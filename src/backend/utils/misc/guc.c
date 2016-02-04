@@ -52,6 +52,7 @@
 #include "parser/parser.h"
 #include "parser/scansup.h"
 #include "pgstat.h"
+#include "postgres_strict.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/bgwriter.h"
@@ -181,6 +182,8 @@ static void assign_application_name(const char *newval, void *extra);
 static bool check_cluster_name(char **newval, void **extra, GucSource source);
 static const char *show_unix_socket_permissions(void);
 static const char *show_log_file_mode(void);
+static void assign_postgres_strict_violation_level(int newval, void *extra);
+
 
 /* Private functions in guc-file.l that need to be called from guc.c */
 static ConfigVariable *ProcessConfigFileInternal(GucContext context,
@@ -379,6 +382,14 @@ static const struct config_enum_entry huge_pages_options[] = {
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry postgres_strict_violation_level_options[] = {
+	{"warning", WARNING, false},
+	{"error", ERROR, false},
+	{"fatal", FATAL, false},
+	{"assert", POSTGRES_STRICT_ASSERT, false},
+	{NULL, 0, false}
+};
+
 /*
  * Options for enum values stored in other modules
  */
@@ -450,6 +461,9 @@ int			ssl_renegotiation_limit;
  */
 int			huge_pages;
 
+int postgres_strict_violation_level = ERROR;
+int postgres_strict_violation_sqlstate = ERRCODE_POSTGRES_STRICT_VIOLATION;
+
 /*
  * These variables are all dummies that don't do anything, except in some
  * cases provide the value for SHOW to display.  The real state is elsewhere
@@ -482,6 +496,7 @@ static int	wal_segment_size;
 static bool integer_datetimes;
 static bool assert_enabled;
 static char *postgres_strict_disable_string;
+static int postgres_strict_violation_level_enum;
 
 /* should be static, but commands/variable.c needs to get at this */
 char	   *role_string;
@@ -3683,6 +3698,16 @@ static struct config_enum ConfigureNamesEnum[] =
 		&huge_pages,
 		HUGE_PAGES_TRY, huge_pages_options,
 		NULL, NULL, NULL
+	},
+
+	{
+		{"plpgsql_strict.violation_level", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Sets the level used for reporting violations specific to postgres-strict."),
+			NULL
+		},
+		&postgres_strict_violation_level_enum,
+		ERROR, postgres_strict_violation_level_options,
+		NULL, assign_postgres_strict_violation_level, NULL
 	},
 
 	/* End-of-list marker */
@@ -10149,6 +10174,29 @@ show_log_file_mode(void)
 
 	snprintf(buf, sizeof(buf), "%04o", Log_file_mode);
 	return buf;
+}
+
+static void
+assign_postgres_strict_violation_level(int newval, void *extra)
+{
+	switch (newval)
+	{
+		case WARNING:
+		case ERROR:
+		case FATAL:
+			postgres_strict_violation_level = newval;
+			postgres_strict_violation_sqlstate = ERRCODE_POSTGRES_STRICT_VIOLATION;
+			break;
+
+		case POSTGRES_STRICT_ASSERT:
+			postgres_strict_violation_level = ERROR;
+			postgres_strict_violation_sqlstate = ERRCODE_ASSERT_FAILURE;
+			break;
+
+		default:
+			/* shouldn't happen */
+			elog(ERROR, "unrecognized value %d", newval);
+	}
 }
 
 #include "guc-file.c"
