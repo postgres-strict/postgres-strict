@@ -22,6 +22,7 @@
  *		ExecReScanValuesScan	rescans the values list
  */
 #include "postgres.h"
+#include "postgres_strict.h"
 
 #include "executor/executor.h"
 #include "executor/nodeValuesscan.h"
@@ -256,6 +257,20 @@ ExecInitValuesScan(ValuesScan *node, EState *estate, int eflags)
 	foreach(vtl, node->values_lists)
 	{
 		scanstate->exprlists[i++] = (List *) lfirst(vtl);
+	}
+
+	if (postgres_strict & POSTGRES_STRICT_RANDOMIZE_VALUES_ORDER)
+	{
+		for (i = list_length(node->values_lists) - 1; i > 0; i--)
+		{
+			long j;
+			List *tmp;
+
+			j = (random() % (i+1));
+			tmp = scanstate->exprlists[i];
+			scanstate->exprlists[i] = scanstate->exprlists[j];
+			scanstate->exprlists[j] = tmp;
+		}
 	}
 
 	scanstate->ss.ps.ps_TupFromTlist = false;
