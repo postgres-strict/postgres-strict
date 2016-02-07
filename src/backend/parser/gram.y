@@ -59,6 +59,7 @@
 #include "parser/gramparse.h"
 #include "parser/parser.h"
 #include "parser/parse_expr.h"
+#include "postgres_strict.h"
 #include "storage/lmgr.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
@@ -13286,9 +13287,19 @@ target_el:	a_expr AS ColLabel
 			 * expression and a column label?  We prefer to resolve this
 			 * as an infix expression, which we accomplish by assigning
 			 * IDENT a precedence higher than POSTFIXOP.
+			 *
+			 * postgres-strict: Omitting AS is not allowed by default, but
+			 * can be controlled via "require_column_as".
 			 */
 			| a_expr IDENT
 				{
+					if (postgres_strict & POSTGRES_STRICT_REQUIRE_COLUMN_AS)
+					{
+						ereport(postgres_strict_violation_level,
+						 (errcode(postgres_strict_violation_sqlstate),
+						  errmsg("AS omitted for column alias"),
+						  parser_errposition(@2)));
+					}
 					$$ = makeNode(ResTarget);
 					$$->name = $2;
 					$$->indirection = NIL;

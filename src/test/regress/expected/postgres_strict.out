@@ -1,0 +1,34 @@
+SET postgres_strict.disable = 'none';
+--
+-- require_column_as
+--
+SELECT 1 AS a;
+ a 
+---
+ 1
+(1 row)
+
+SELECT 1 a;
+ERROR:  AS omitted for column alias
+LINE 1: SELECT 1 a;
+                 ^
+SELECT 1a;
+ERROR:  AS omitted for column alias
+LINE 1: SELECT 1a;
+                ^
+DO $$
+DECLARE
+_r record;
+BEGIN
+SELECT 1 a INTO _r;
+END $$;
+ERROR:  AS omitted for column alias
+LINE 5: SELECT 1 a INTO _r;
+                 ^
+DO $$
+BEGIN
+RAISE NOTICE '%', 1 a;
+END $$;
+ERROR:  AS omitted for column alias
+LINE 3: RAISE NOTICE '%', 1 a;
+                            ^
