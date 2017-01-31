@@ -8,7 +8,7 @@
  *
  * This code is released under the terms of the PostgreSQL License.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/test/regress/pg_regress.c
@@ -80,7 +80,7 @@ static char *encoding = NULL;
 static _stringlist *schedulelist = NULL;
 static _stringlist *extra_tests = NULL;
 static char *temp_instance = NULL;
-static char *temp_config = NULL;
+static _stringlist *temp_configs = NULL;
 static bool nolocale = false;
 static bool use_existing = false;
 static char *hostname = NULL;
@@ -151,10 +151,10 @@ unlimit_core_size(void)
 void
 add_stringlist_item(_stringlist **listhead, const char *str)
 {
-	_stringlist *newentry = malloc(sizeof(_stringlist));
+	_stringlist *newentry = pg_malloc(sizeof(_stringlist));
 	_stringlist *oldentry;
 
-	newentry->str = strdup(str);
+	newentry->str = pg_strdup(str);
 	newentry->next = NULL;
 	if (*listhead == NULL)
 		*listhead = newentry;
@@ -187,7 +187,7 @@ free_stringlist(_stringlist **listhead)
 static void
 split_to_stringlist(const char *s, const char *delim, _stringlist **listhead)
 {
-	char	   *sc = strdup(s);
+	char	   *sc = pg_strdup(s);
 	char	   *token = strtok(sc, delim);
 
 	while (token)
@@ -265,7 +265,7 @@ stop_postmaster(void)
 		fflush(stderr);
 
 		snprintf(buf, sizeof(buf),
-				 "\"%s%spg_ctl\" stop -D \"%s/data\" -s -m fast",
+				 "\"%s%spg_ctl\" stop -D \"%s/data\" -s",
 				 bindir ? bindir : "",
 				 bindir ? "/" : "",
 				 temp_instance);
@@ -327,7 +327,7 @@ signal_remove_temp(int signum)
 static const char *
 make_temp_sockdir(void)
 {
-	char	   *template = strdup("/tmp/pg_regress-XXXXXX");
+	char	   *template = pg_strdup("/tmp/pg_regress-XXXXXX");
 
 	temp_sockdir = mkdtemp(template);
 	if (temp_sockdir == NULL)
@@ -441,7 +441,7 @@ replace_string(char *string, char *replace, char *replacement)
 
 	while ((ptr = strstr(string, replace)) != NULL)
 	{
-		char	   *dup = strdup(string);
+		char	   *dup = pg_strdup(string);
 
 		strlcpy(string, dup, ptr - string + 1);
 		strcat(string, replacement);
@@ -661,11 +661,11 @@ load_resultmap(void)
 		 */
 		if (string_matches_pattern(host_platform, platform))
 		{
-			_resultmap *entry = malloc(sizeof(_resultmap));
+			_resultmap *entry = pg_malloc(sizeof(_resultmap));
 
-			entry->test = strdup(buf);
-			entry->type = strdup(file_type);
-			entry->resultfile = strdup(expected);
+			entry->test = pg_strdup(buf);
+			entry->type = pg_strdup(file_type);
+			entry->resultfile = pg_strdup(expected);
 			entry->next = resultmap;
 			resultmap = entry;
 		}
@@ -738,9 +738,9 @@ initialize_environment(void)
 		/*
 		 * Most platforms have adopted the POSIX locale as their
 		 * implementation-defined default locale.  Exceptions include native
-		 * Windows, Darwin with --enable-nls, and Cygwin with --enable-nls.
+		 * Windows, macOS with --enable-nls, and Cygwin with --enable-nls.
 		 * (Use of --enable-nls matters because libintl replaces setlocale().)
-		 * Also, PostgreSQL does not support Darwin with locale environment
+		 * Also, PostgreSQL does not support macOS with locale environment
 		 * variables unset; see PostmasterMain().
 		 */
 #if defined(WIN32) || defined(__CYGWIN__) || defined(__darwin__)
@@ -876,6 +876,29 @@ initialize_environment(void)
 	load_resultmap();
 }
 
+pg_attribute_unused()
+static const char *
+fmtHba(const char *raw)
+{
+	static char *ret;
+	const char *rp;
+	char	   *wp;
+
+	wp = ret = realloc(ret, 3 + strlen(raw) * 2);
+
+	*wp++ = '"';
+	for (rp = raw; *rp; rp++)
+	{
+		if (*rp == '"')
+			*wp++ = '"';
+		*wp++ = *rp;
+	}
+	*wp++ = '"';
+	*wp++ = '\0';
+
+	return ret;
+}
+
 #ifdef ENABLE_SSPI
 /*
  * Get account and domain/realm names for the current user.  This is based on
@@ -904,15 +927,15 @@ current_windows_user(const char **acct, const char **dom)
 	if (!GetTokenInformation(token, TokenUser, NULL, 0, &retlen) && GetLastError() != 122)
 	{
 		fprintf(stderr,
-				_("%s: could not get token user size: error code %lu\n"),
+				_("%s: could not get token information buffer size: error code %lu\n"),
 				progname, GetLastError());
 		exit(2);
 	}
-	tokenuser = malloc(retlen);
+	tokenuser = pg_malloc(retlen);
 	if (!GetTokenInformation(token, TokenUser, tokenuser, retlen, &retlen))
 	{
 		fprintf(stderr,
-				_("%s: could not get token user: error code %lu\n"),
+				_("%s: could not get token information: error code %lu\n"),
 				progname, GetLastError());
 		exit(2);
 	}
@@ -1037,11 +1060,11 @@ config_sspi_auth(const char *pgdata)
 	 * '#'.  Windows forbids the double-quote character itself, so don't
 	 * bother escaping embedded double-quote characters.
 	 */
-	CW(fprintf(ident, "regress  \"%s@%s\"  \"%s\"\n",
-			   accountname, domainname, username) >= 0);
+	CW(fprintf(ident, "regress  \"%s@%s\"  %s\n",
+			   accountname, domainname, fmtHba(username)) >= 0);
 	for (sl = extraroles; sl; sl = sl->next)
-		CW(fprintf(ident, "regress  \"%s@%s\"  \"%s\"\n",
-				   accountname, domainname, sl->str) >= 0);
+		CW(fprintf(ident, "regress  \"%s@%s\"  %s\n",
+				   accountname, domainname, fmtHba(sl->str)) >= 0);
 	CW(fclose(ident) == 0);
 }
 #endif
@@ -1329,7 +1352,7 @@ results_differ(const char *testname, const char *resultsfile, const char *defaul
 	if (platform_expectfile)
 	{
 		/*
-		 * Replace everything afer the last slash in expectfile with what the
+		 * Replace everything after the last slash in expectfile with what the
 		 * platform_expectfile contains.
 		 */
 		char	   *p = strrchr(expectfile, '/');
@@ -1460,7 +1483,7 @@ wait_for_tests(PID_TYPE * pids, int *statuses, char **names, int num_tests)
 	int			i;
 
 #ifdef WIN32
-	PID_TYPE   *active_pids = malloc(num_tests * sizeof(PID_TYPE));
+	PID_TYPE   *active_pids = pg_malloc(num_tests * sizeof(PID_TYPE));
 
 	memcpy(active_pids, pids, num_tests * sizeof(PID_TYPE));
 #endif
@@ -1848,7 +1871,7 @@ open_result_files(void)
 
 	/* create the log file (copy of running status output) */
 	snprintf(file, sizeof(file), "%s/regression.out", outputdir);
-	logfilename = strdup(file);
+	logfilename = pg_strdup(file);
 	logfile = fopen(logfilename, "w");
 	if (!logfile)
 	{
@@ -1859,7 +1882,7 @@ open_result_files(void)
 
 	/* create the diffs file as empty */
 	snprintf(file, sizeof(file), "%s/regression.diffs", outputdir);
-	difffilename = strdup(file);
+	difffilename = pg_strdup(file);
 	difffile = fopen(difffilename, "w");
 	if (!difffile)
 	{
@@ -2064,13 +2087,13 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 				 * before we add the specified one.
 				 */
 				free_stringlist(&dblist);
-				split_to_stringlist(strdup(optarg), ", ", &dblist);
+				split_to_stringlist(optarg, ",", &dblist);
 				break;
 			case 2:
 				debug = true;
 				break;
 			case 3:
-				inputdir = strdup(optarg);
+				inputdir = pg_strdup(optarg);
 				break;
 			case 4:
 				add_stringlist_item(&loadlanguage, optarg);
@@ -2079,10 +2102,10 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 				max_connections = atoi(optarg);
 				break;
 			case 6:
-				encoding = strdup(optarg);
+				encoding = pg_strdup(optarg);
 				break;
 			case 7:
-				outputdir = strdup(optarg);
+				outputdir = pg_strdup(optarg);
 				break;
 			case 8:
 				add_stringlist_item(&schedulelist, optarg);
@@ -2094,42 +2117,42 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 				nolocale = true;
 				break;
 			case 13:
-				hostname = strdup(optarg);
+				hostname = pg_strdup(optarg);
 				break;
 			case 14:
 				port = atoi(optarg);
 				port_specified_by_user = true;
 				break;
 			case 15:
-				user = strdup(optarg);
+				user = pg_strdup(optarg);
 				break;
 			case 16:
 				/* "--bindir=" means to use PATH */
 				if (strlen(optarg))
-					bindir = strdup(optarg);
+					bindir = pg_strdup(optarg);
 				else
 					bindir = NULL;
 				break;
 			case 17:
-				dlpath = strdup(optarg);
+				dlpath = pg_strdup(optarg);
 				break;
 			case 18:
-				split_to_stringlist(strdup(optarg), ", ", &extraroles);
+				split_to_stringlist(optarg, ",", &extraroles);
 				break;
 			case 19:
-				temp_config = strdup(optarg);
+				add_stringlist_item(&temp_configs, optarg);
 				break;
 			case 20:
 				use_existing = true;
 				break;
 			case 21:
-				launcher = strdup(optarg);
+				launcher = pg_strdup(optarg);
 				break;
 			case 22:
 				add_stringlist_item(&loadextension, optarg);
 				break;
 			case 24:
-				config_auth_datadir = pstrdup(optarg);
+				config_auth_datadir = pg_strdup(optarg);
 				break;
 			default:
 				/* getopt_long already emitted a complaint */
@@ -2185,6 +2208,8 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 	if (temp_instance)
 	{
 		FILE	   *pg_conf;
+		const char *env_wait;
+		int			wait_seconds;
 
 		/*
 		 * Prepare the temp instance
@@ -2214,7 +2239,7 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 		/* initdb */
 		header(_("initializing database system"));
 		snprintf(buf, sizeof(buf),
-				 "\"%s%sinitdb\" -D \"%s/data\" --noclean --nosync%s%s > \"%s/log/initdb.log\" 2>&1",
+				 "\"%s%sinitdb\" -D \"%s/data\" --no-clean --no-sync%s%s > \"%s/log/initdb.log\" 2>&1",
 				 bindir ? bindir : "",
 				 bindir ? "/" : "",
 				 temp_instance,
@@ -2245,12 +2270,14 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 		fputs("\n# Configuration added by pg_regress\n\n", pg_conf);
 		fputs("log_autovacuum_min_duration = 0\n", pg_conf);
 		fputs("log_checkpoints = on\n", pg_conf);
+		fputs("log_line_prefix = '%m [%p] %q%a '\n", pg_conf);
 		fputs("log_lock_waits = on\n", pg_conf);
 		fputs("log_temp_files = 128kB\n", pg_conf);
 		fputs("max_prepared_transactions = 2\n", pg_conf);
 
-		if (temp_config != NULL)
+		for (sl = temp_configs; sl != NULL; sl = sl->next)
 		{
+			char	   *temp_config = sl->str;
 			FILE	   *extra_conf;
 			char		line_buf[1024];
 
@@ -2334,11 +2361,23 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 		}
 
 		/*
-		 * Wait till postmaster is able to accept connections (normally only a
-		 * second or so, but Cygwin is reportedly *much* slower).  Don't wait
-		 * forever, however.
+		 * Wait till postmaster is able to accept connections; normally this
+		 * is only a second or so, but Cygwin is reportedly *much* slower, and
+		 * test builds using Valgrind or similar tools might be too.  Hence,
+		 * allow the default timeout of 60 seconds to be overridden from the
+		 * PGCTLTIMEOUT environment variable.
 		 */
-		for (i = 0; i < 60; i++)
+		env_wait = getenv("PGCTLTIMEOUT");
+		if (env_wait != NULL)
+		{
+			wait_seconds = atoi(env_wait);
+			if (wait_seconds <= 0)
+				wait_seconds = 60;
+		}
+		else
+			wait_seconds = 60;
+
+		for (i = 0; i < wait_seconds; i++)
 		{
 			/* Done if psql succeeds */
 			if (system(buf2) == 0)
@@ -2359,9 +2398,10 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 
 			pg_usleep(1000000L);
 		}
-		if (i >= 60)
+		if (i >= wait_seconds)
 		{
-			fprintf(stderr, _("\n%s: postmaster did not respond within 60 seconds\nExamine %s/log/postmaster.log for the reason\n"), progname, outputdir);
+			fprintf(stderr, _("\n%s: postmaster did not respond within %d seconds\nExamine %s/log/postmaster.log for the reason\n"),
+					progname, wait_seconds, outputdir);
 
 			/*
 			 * If we get here, the postmaster is probably wedged somewhere in
@@ -2385,7 +2425,7 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 
 		postmaster_running = true;
 
-#ifdef WIN64
+#ifdef _WIN64
 /* need a series of two casts to convert HANDLE without compiler warning */
 #define ULONGPID(x) (unsigned long) (unsigned long long) (x)
 #else

@@ -4,7 +4,7 @@
  *	  Support routines for scanning Values lists
  *	  ("VALUES (...), (...), ..." in rangetable).
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -26,6 +26,7 @@
 
 #include "executor/executor.h"
 #include "executor/nodeValuesscan.h"
+#include "utils/expandeddatum.h"
 
 
 static TupleTableSlot *ValuesNext(ValuesScanState *node);
@@ -95,6 +96,7 @@ ValuesNext(ValuesScanState *node)
 		List	   *exprstatelist;
 		Datum	   *values;
 		bool	   *isnull;
+		Form_pg_attribute *att;
 		ListCell   *lc;
 		int			resind;
 
@@ -130,6 +132,7 @@ ValuesNext(ValuesScanState *node)
 		 */
 		values = slot->tts_values;
 		isnull = slot->tts_isnull;
+		att = slot->tts_tupleDescriptor->attrs;
 
 		resind = 0;
 		foreach(lc, exprstatelist)
@@ -138,8 +141,18 @@ ValuesNext(ValuesScanState *node)
 
 			values[resind] = ExecEvalExpr(estate,
 										  econtext,
-										  &isnull[resind],
-										  NULL);
+										  &isnull[resind]);
+
+			/*
+			 * We must force any R/W expanded datums to read-only state, in
+			 * case they are multiply referenced in the plan node's output
+			 * expressions, or in case we skip the output projection and the
+			 * output column is multiply referenced in higher plan nodes.
+			 */
+			values[resind] = MakeExpandedObjectReadOnly(values[resind],
+														isnull[resind],
+														att[resind]->attlen);
+
 			resind++;
 		}
 
@@ -272,8 +285,6 @@ ExecInitValuesScan(ValuesScan *node, EState *estate, int eflags)
 			scanstate->exprlists[j] = tmp;
 		}
 	}
-
-	scanstate->ss.ps.ps_TupFromTlist = false;
 
 	/*
 	 * Initialize result tuple type and projection info.

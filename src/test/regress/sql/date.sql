@@ -186,6 +186,12 @@ SELECT date '01 08 1999';
 SELECT date '99 08 01';
 SELECT date '1999 08 01';
 
+-- Check upper and lower limits of date range
+SELECT date '4714-11-24 BC';
+SELECT date '4714-11-23 BC';  -- out of range
+SELECT date '5874897-12-31';
+SELECT date '5874898-01-01';  -- out of range
+
 RESET datestyle;
 
 --
@@ -332,11 +338,11 @@ SELECT EXTRACT(UNDEFINED FROM DATE 'infinity');     -- ERROR:  timestamp units "
 
 -- test constructors
 select make_date(2013, 7, 15);
+select make_date(-44, 3, 15);
 select make_time(8, 20, 0.0);
 -- should fail
 select make_date(2013, 2, 30);
 select make_date(2013, 13, 1);
 select make_date(2013, 11, -1);
-select make_date(-44, 3, 15);  -- perhaps we should allow this sometime?
 select make_time(10, 55, 100.1);
 select make_time(24, 0, 2.1);

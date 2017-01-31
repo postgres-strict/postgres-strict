@@ -261,6 +261,46 @@ insert into syscolconflicttest values (1) on conflict (key) do update set data =
 insert into syscolconflicttest values (1) on conflict (key) do update set data = excluded.oid::text;
 drop table syscolconflicttest;
 
+--
+-- Previous tests all managed to not test any expressions requiring
+-- planner preprocessing ...
+--
+create table insertconflict (a bigint, b bigint);
+
+create unique index insertconflicti1 on insertconflict(coalesce(a, 0));
+
+create unique index insertconflicti2 on insertconflict(b)
+  where coalesce(a, 1) > 0;
+
+insert into insertconflict values (1, 2)
+on conflict (coalesce(a, 0)) do nothing;
+
+insert into insertconflict values (1, 2)
+on conflict (b) where coalesce(a, 1) > 0 do nothing;
+
+insert into insertconflict values (1, 2)
+on conflict (b) where coalesce(a, 1) > 1 do nothing;
+
+drop table insertconflict;
+
+--
+-- test insertion through view
+--
+
+create table insertconflict (f1 int primary key, f2 text);
+create view insertconflictv as
+  select * from insertconflict with cascaded check option;
+
+insert into insertconflictv values (1,'foo')
+  on conflict (f1) do update set f2 = excluded.f2;
+select * from insertconflict;
+insert into insertconflictv values (1,'bar')
+  on conflict (f1) do update set f2 = excluded.f2;
+select * from insertconflict;
+
+drop view insertconflictv;
+drop table insertconflict;
+
 
 -- ******************************************************************
 -- *                                                                *
@@ -385,3 +425,49 @@ insert into dropcol(key, keep1, keep2) values(1, '5', 5) on conflict(key)
 ;
 
 DROP TABLE dropcol;
+
+-- check handling of regular btree constraint along with gist constraint
+
+create table twoconstraints (f1 int unique, f2 box,
+                             exclude using gist(f2 with &&));
+insert into twoconstraints values(1, '((0,0),(1,1))');
+insert into twoconstraints values(1, '((2,2),(3,3))');  -- fail on f1
+insert into twoconstraints values(2, '((0,0),(1,2))');  -- fail on f2
+insert into twoconstraints values(2, '((0,0),(1,2))')
+  on conflict on constraint twoconstraints_f1_key do nothing;  -- fail on f2
+insert into twoconstraints values(2, '((0,0),(1,2))')
+  on conflict on constraint twoconstraints_f2_excl do nothing;  -- do nothing
+select * from twoconstraints;
+drop table twoconstraints;
+
+-- check handling of self-conflicts at various isolation levels
+
+create table selfconflict (f1 int primary key, f2 int);
+
+begin transaction isolation level read committed;
+insert into selfconflict values (1,1), (1,2) on conflict do nothing;
+commit;
+
+begin transaction isolation level repeatable read;
+insert into selfconflict values (2,1), (2,2) on conflict do nothing;
+commit;
+
+begin transaction isolation level serializable;
+insert into selfconflict values (3,1), (3,2) on conflict do nothing;
+commit;
+
+begin transaction isolation level read committed;
+insert into selfconflict values (4,1), (4,2) on conflict(f1) do update set f2 = 0;
+commit;
+
+begin transaction isolation level repeatable read;
+insert into selfconflict values (5,1), (5,2) on conflict(f1) do update set f2 = 0;
+commit;
+
+begin transaction isolation level serializable;
+insert into selfconflict values (6,1), (6,2) on conflict(f1) do update set f2 = 0;
+commit;
+
+select * from selfconflict;
+
+drop table selfconflict;

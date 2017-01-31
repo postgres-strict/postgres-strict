@@ -1,7 +1,7 @@
--- make sure the prerequisite libraries are loaded
-LOAD 'plperl';
-SELECT NULL::hstore;
+/* contrib/hstore_plperl/hstore_plperlu--1.0.sql */
 
+-- complain if script is sourced in psql, rather than via CREATE EXTENSION
+\echo Use "CREATE EXTENSION hstore_plperlu" to load this file. \quit
 
 CREATE FUNCTION hstore_to_plperlu(val internal) RETURNS internal
 LANGUAGE C STRICT IMMUTABLE

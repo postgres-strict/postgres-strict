@@ -2346,6 +2346,30 @@ CREATE UNLOGGED TABLE unlogged_hash_table (id int4);
 CREATE INDEX unlogged_hash_index ON unlogged_hash_table USING hash (id int4_ops);
 DROP TABLE unlogged_hash_table;
 -- CREATE INDEX hash_ovfl_index ON hash_ovfl_heap USING hash (x int4_ops);
+-- Test hash index build tuplesorting.  Force hash tuplesort using low
+-- maintenance_work_mem setting and fillfactor:
+SET maintenance_work_mem = '1MB';
+CREATE INDEX hash_tuplesort_idx ON tenk1 USING hash (stringu1 name_ops) WITH (fillfactor = 10);
+WARNING:  hash indexes are not WAL-logged and their use is discouraged
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM tenk1 WHERE stringu1 = 'TVAAAA';
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Aggregate
+   ->  Bitmap Heap Scan on tenk1
+         Recheck Cond: (stringu1 = 'TVAAAA'::name)
+         ->  Bitmap Index Scan on hash_tuplesort_idx
+               Index Cond: (stringu1 = 'TVAAAA'::name)
+(5 rows)
+
+SELECT count(*) FROM tenk1 WHERE stringu1 = 'TVAAAA';
+ count 
+-------
+    14
+(1 row)
+
+DROP INDEX hash_tuplesort_idx;
+RESET maintenance_work_mem;
 --
 -- Test functional index
 --
@@ -2428,11 +2452,11 @@ DETAIL:  Key (f2)=(b) is duplicated.
 DELETE FROM concur_heap WHERE f1 = 'b';
 VACUUM FULL concur_heap;
 \d concur_heap
-Table "public.concur_heap"
- Column | Type | Modifiers 
---------+------+-----------
- f1     | text | 
- f2     | text | 
+           Table "public.concur_heap"
+ Column | Type | Collation | Nullable | Default 
+--------+------+-----------+----------+---------
+ f1     | text |           |          | 
+ f2     | text |           |          | 
 Indexes:
     "concur_index2" UNIQUE, btree (f1)
     "concur_index3" UNIQUE, btree (f2) INVALID
@@ -2444,11 +2468,11 @@ Indexes:
 
 REINDEX TABLE concur_heap;
 \d concur_heap
-Table "public.concur_heap"
- Column | Type | Modifiers 
---------+------+-----------
- f1     | text | 
- f2     | text | 
+           Table "public.concur_heap"
+ Column | Type | Collation | Nullable | Default 
+--------+------+-----------+----------+---------
+ f1     | text |           |          | 
+ f2     | text |           |          | 
 Indexes:
     "concur_index2" UNIQUE, btree (f1)
     "concur_index3" UNIQUE, btree (f2)
@@ -2478,11 +2502,11 @@ DROP INDEX CONCURRENTLY "concur_index5";
 DROP INDEX CONCURRENTLY "concur_index1";
 DROP INDEX CONCURRENTLY "concur_heap_expr_idx";
 \d concur_heap
-Table "public.concur_heap"
- Column | Type | Modifiers 
---------+------+-----------
- f1     | text | 
- f2     | text | 
+           Table "public.concur_heap"
+ Column | Type | Collation | Nullable | Default 
+--------+------+-----------+----------+---------
+ f1     | text |           |          | 
+ f2     | text |           |          | 
 Indexes:
     "std_index" btree (f2)
 
@@ -2496,12 +2520,12 @@ INSERT INTO cwi_test VALUES(1, 2), (3, 4), (5, 6);
 CREATE UNIQUE INDEX cwi_uniq_idx ON cwi_test(a , b);
 ALTER TABLE cwi_test ADD primary key USING INDEX cwi_uniq_idx;
 \d cwi_test
-          Table "public.cwi_test"
- Column |         Type          | Modifiers 
---------+-----------------------+-----------
- a      | integer               | not null
- b      | character varying(10) | not null
- c      | character(1)          | 
+                     Table "public.cwi_test"
+ Column |         Type          | Collation | Nullable | Default 
+--------+-----------------------+-----------+----------+---------
+ a      | integer               |           | not null | 
+ b      | character varying(10) |           | not null | 
+ c      | character(1)          |           |          | 
 Indexes:
     "cwi_uniq_idx" PRIMARY KEY, btree (a, b)
 
@@ -2519,12 +2543,12 @@ ALTER TABLE cwi_test DROP CONSTRAINT cwi_uniq_idx,
 		USING INDEX cwi_uniq2_idx;
 NOTICE:  ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index "cwi_uniq2_idx" to "cwi_replaced_pkey"
 \d cwi_test
-          Table "public.cwi_test"
- Column |         Type          | Modifiers 
---------+-----------------------+-----------
- a      | integer               | not null
- b      | character varying(10) | not null
- c      | character(1)          | 
+                     Table "public.cwi_test"
+ Column |         Type          | Collation | Nullable | Default 
+--------+-----------------------+-----------+----------+---------
+ a      | integer               |           | not null | 
+ b      | character varying(10) |           | not null | 
+ c      | character(1)          |           |          | 
 Indexes:
     "cwi_replaced_pkey" PRIMARY KEY, btree (b, a)
 
@@ -2540,6 +2564,22 @@ DROP INDEX cwi_replaced_pkey;	-- Should fail; a constraint depends on it
 ERROR:  cannot drop index cwi_replaced_pkey because constraint cwi_replaced_pkey on table cwi_test requires it
 HINT:  You can drop constraint cwi_replaced_pkey on table cwi_test instead.
 DROP TABLE cwi_test;
+--
+-- Check handling of indexes on system columns
+--
+CREATE TABLE oid_table (a INT) WITH OIDS;
+-- An index on the OID column should be allowed
+CREATE INDEX ON oid_table (oid);
+-- Other system columns cannot be indexed
+CREATE INDEX ON oid_table (ctid);
+ERROR:  index creation on system columns is not supported
+-- nor used in expressions
+CREATE INDEX ON oid_table ((ctid >= '(1000,0)'));
+ERROR:  index creation on system columns is not supported
+-- nor used in predicates
+CREATE INDEX ON oid_table (a) WHERE ctid >= '(1000,0)';
+ERROR:  index creation on system columns is not supported
+DROP TABLE oid_table;
 --
 -- Tests for IS NULL/IS NOT NULL with b-tree indexes
 --
@@ -2900,7 +2940,7 @@ ORDER BY thousand;
         1 |     1001
 (2 rows)
 
-RESET enable_indexscan;
+RESET enable_indexonlyscan;
 --
 -- Check elimination of constant-NULL subexpressions
 --
@@ -2911,6 +2951,48 @@ explain (costs off)
  Index Scan using tenk1_thous_tenthous on tenk1
    Index Cond: ((thousand = 1) AND (tenthous = 1001))
 (2 rows)
+
+--
+-- Check matching of boolean index columns to WHERE conditions and sort keys
+--
+create temp table boolindex (b bool, i int, unique(b, i), junk float);
+explain (costs off)
+  select * from boolindex order by b, i limit 10;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Limit
+   ->  Index Scan using boolindex_b_i_key on boolindex
+(2 rows)
+
+explain (costs off)
+  select * from boolindex where b order by i limit 10;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Limit
+   ->  Index Scan using boolindex_b_i_key on boolindex
+         Index Cond: (b = true)
+         Filter: b
+(4 rows)
+
+explain (costs off)
+  select * from boolindex where b = true order by i desc limit 10;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Limit
+   ->  Index Scan Backward using boolindex_b_i_key on boolindex
+         Index Cond: (b = true)
+         Filter: b
+(4 rows)
+
+explain (costs off)
+  select * from boolindex where not b order by i limit 10;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Limit
+   ->  Index Scan using boolindex_b_i_key on boolindex
+         Index Cond: (b = false)
+         Filter: (NOT b)
+(4 rows)
 
 --
 -- REINDEX (VERBOSE)
@@ -2980,13 +3062,13 @@ REINDEX SCHEMA schema_to_reindex; -- failure, cannot run in a transaction
 ERROR:  REINDEX SCHEMA cannot run inside a transaction block
 END;
 -- Failure for unauthorized user
-CREATE ROLE regression_reindexuser NOLOGIN;
-SET SESSION ROLE regression_reindexuser;
+CREATE ROLE regress_reindexuser NOLOGIN;
+SET SESSION ROLE regress_reindexuser;
 REINDEX SCHEMA schema_to_reindex;
 ERROR:  must be owner of schema schema_to_reindex
 -- Clean up
 RESET ROLE;
-DROP ROLE regression_reindexuser;
+DROP ROLE regress_reindexuser;
 SET client_min_messages TO 'warning';
 DROP SCHEMA schema_to_reindex CASCADE;
 RESET client_min_messages;

@@ -6,7 +6,7 @@
  * See src/backend/optimizer/README for discussion of EquivalenceClasses.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -15,6 +15,8 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+
+#include <limits.h>
 
 #include "access/stratnum.h"
 #include "catalog/pg_type.h"
@@ -78,8 +80,15 @@ static bool reconsider_full_join_clause(PlannerInfo *root,
  * care to mark an EquivalenceClass if it came from any such clauses.  Also,
  * we have to check that both sides are either pseudo-constants or strict
  * functions of Vars, else they might not both go to NULL above the outer
- * join.  (This is the reason why we need a failure return.  It's more
+ * join.  (This is the main reason why we need a failure return.  It's more
  * convenient to check this case here than at the call sites...)
+ *
+ * We also reject proposed equivalence clauses if they contain leaky functions
+ * and have security_level above zero.  The EC evaluation rules require us to
+ * apply certain tests at certain joining levels, and we can't tolerate
+ * delaying any test on security_level grounds.  By rejecting candidate clauses
+ * that might require security delays, we ensure it's safe to apply an EC
+ * clause as soon as it's supposed to be applied.
  *
  * On success return, we have also initialized the clause's left_ec/right_ec
  * fields to point to the EquivalenceClass representing it.  This saves lookup
@@ -119,6 +128,10 @@ process_equivalence(PlannerInfo *root, RestrictInfo *restrictinfo,
 	/* Should not already be marked as having generated an eclass */
 	Assert(restrictinfo->left_ec == NULL);
 	Assert(restrictinfo->right_ec == NULL);
+
+	/* Reject if it is potentially postponable by security considerations */
+	if (restrictinfo->security_level > 0 && !restrictinfo->leakproof)
+		return false;
 
 	/* Extract info from given clause */
 	Assert(is_opclause(clause));
@@ -275,6 +288,10 @@ process_equivalence(PlannerInfo *root, RestrictInfo *restrictinfo,
 		{
 			ec1->ec_sources = lappend(ec1->ec_sources, restrictinfo);
 			ec1->ec_below_outer_join |= below_outer_join;
+			ec1->ec_min_security = Min(ec1->ec_min_security,
+									   restrictinfo->security_level);
+			ec1->ec_max_security = Max(ec1->ec_max_security,
+									   restrictinfo->security_level);
 			/* mark the RI as associated with this eclass */
 			restrictinfo->left_ec = ec1;
 			restrictinfo->right_ec = ec1;
@@ -306,6 +323,10 @@ process_equivalence(PlannerInfo *root, RestrictInfo *restrictinfo,
 		ec1->ec_has_const |= ec2->ec_has_const;
 		/* can't need to set has_volatile */
 		ec1->ec_below_outer_join |= ec2->ec_below_outer_join;
+		ec1->ec_min_security = Min(ec1->ec_min_security,
+								   ec2->ec_min_security);
+		ec1->ec_max_security = Max(ec1->ec_max_security,
+								   ec2->ec_max_security);
 		ec2->ec_merged = ec1;
 		root->eq_classes = list_delete_ptr(root->eq_classes, ec2);
 		/* just to avoid debugging confusion w/ dangling pointers: */
@@ -315,6 +336,10 @@ process_equivalence(PlannerInfo *root, RestrictInfo *restrictinfo,
 		ec2->ec_relids = NULL;
 		ec1->ec_sources = lappend(ec1->ec_sources, restrictinfo);
 		ec1->ec_below_outer_join |= below_outer_join;
+		ec1->ec_min_security = Min(ec1->ec_min_security,
+								   restrictinfo->security_level);
+		ec1->ec_max_security = Max(ec1->ec_max_security,
+								   restrictinfo->security_level);
 		/* mark the RI as associated with this eclass */
 		restrictinfo->left_ec = ec1;
 		restrictinfo->right_ec = ec1;
@@ -329,6 +354,10 @@ process_equivalence(PlannerInfo *root, RestrictInfo *restrictinfo,
 							false, item2_type);
 		ec1->ec_sources = lappend(ec1->ec_sources, restrictinfo);
 		ec1->ec_below_outer_join |= below_outer_join;
+		ec1->ec_min_security = Min(ec1->ec_min_security,
+								   restrictinfo->security_level);
+		ec1->ec_max_security = Max(ec1->ec_max_security,
+								   restrictinfo->security_level);
 		/* mark the RI as associated with this eclass */
 		restrictinfo->left_ec = ec1;
 		restrictinfo->right_ec = ec1;
@@ -343,6 +372,10 @@ process_equivalence(PlannerInfo *root, RestrictInfo *restrictinfo,
 							false, item1_type);
 		ec2->ec_sources = lappend(ec2->ec_sources, restrictinfo);
 		ec2->ec_below_outer_join |= below_outer_join;
+		ec2->ec_min_security = Min(ec2->ec_min_security,
+								   restrictinfo->security_level);
+		ec2->ec_max_security = Max(ec2->ec_max_security,
+								   restrictinfo->security_level);
 		/* mark the RI as associated with this eclass */
 		restrictinfo->left_ec = ec2;
 		restrictinfo->right_ec = ec2;
@@ -366,6 +399,8 @@ process_equivalence(PlannerInfo *root, RestrictInfo *restrictinfo,
 		ec->ec_below_outer_join = below_outer_join;
 		ec->ec_broken = false;
 		ec->ec_sortref = 0;
+		ec->ec_min_security = restrictinfo->security_level;
+		ec->ec_max_security = restrictinfo->security_level;
 		ec->ec_merged = NULL;
 		em1 = add_eq_member(ec, item1, item1_relids, item1_nullable_relids,
 							false, item1_type);
@@ -639,6 +674,8 @@ get_eclass_for_sort_expr(PlannerInfo *root,
 	newec->ec_below_outer_join = false;
 	newec->ec_broken = false;
 	newec->ec_sortref = sortref;
+	newec->ec_min_security = UINT_MAX;
+	newec->ec_max_security = 0;
 	newec->ec_merged = NULL;
 
 	if (newec->ec_has_volatile && sortref == 0) /* should not happen */
@@ -834,6 +871,7 @@ generate_base_implied_equalities_const(PlannerInfo *root,
 								 bms_copy(ec->ec_relids),
 								 bms_union(cur_em->em_nullable_relids,
 										   const_em->em_nullable_relids),
+								 ec->ec_min_security,
 								 ec->ec_below_outer_join,
 								 cur_em->em_is_const);
 	}
@@ -890,6 +928,7 @@ generate_base_implied_equalities_no_const(PlannerInfo *root,
 									 bms_copy(ec->ec_relids),
 									 bms_union(prev_em->em_nullable_relids,
 											   cur_em->em_nullable_relids),
+									 ec->ec_min_security,
 									 ec->ec_below_outer_join,
 									 false);
 		}
@@ -910,7 +949,8 @@ generate_base_implied_equalities_no_const(PlannerInfo *root,
 	{
 		EquivalenceMember *cur_em = (EquivalenceMember *) lfirst(lc);
 		List	   *vars = pull_var_clause((Node *) cur_em->em_expr,
-										   PVC_RECURSE_AGGREGATES,
+										   PVC_RECURSE_AGGREGATES |
+										   PVC_RECURSE_WINDOWFUNCS |
 										   PVC_INCLUDE_PLACEHOLDERS);
 
 		add_vars_to_targetlist(root, vars, ec->ec_relids, false);
@@ -987,13 +1027,31 @@ generate_base_implied_equalities_broken(PlannerInfo *root,
  *
  * join_relids should always equal bms_union(outer_relids, inner_rel->relids).
  * We could simplify this function's API by computing it internally, but in
- * all current uses, the caller has the value at hand anyway.
+ * most current uses, the caller has the value at hand anyway.
  */
 List *
 generate_join_implied_equalities(PlannerInfo *root,
 								 Relids join_relids,
 								 Relids outer_relids,
 								 RelOptInfo *inner_rel)
+{
+	return generate_join_implied_equalities_for_ecs(root,
+													root->eq_classes,
+													join_relids,
+													outer_relids,
+													inner_rel);
+}
+
+/*
+ * generate_join_implied_equalities_for_ecs
+ *	  As above, but consider only the listed ECs.
+ */
+List *
+generate_join_implied_equalities_for_ecs(PlannerInfo *root,
+										 List *eclasses,
+										 Relids join_relids,
+										 Relids outer_relids,
+										 RelOptInfo *inner_rel)
 {
 	List	   *result = NIL;
 	Relids		inner_relids = inner_rel->relids;
@@ -1015,7 +1073,7 @@ generate_join_implied_equalities(PlannerInfo *root,
 		nominal_join_relids = join_relids;
 	}
 
-	foreach(lc, root->eq_classes)
+	foreach(lc, eclasses)
 	{
 		EquivalenceClass *ec = (EquivalenceClass *) lfirst(lc);
 		List	   *sublist = NIL;
@@ -1294,7 +1352,13 @@ select_equality_operator(EquivalenceClass *ec, Oid lefttype, Oid righttype)
 
 		opno = get_opfamily_member(opfamily, lefttype, righttype,
 								   BTEqualStrategyNumber);
-		if (OidIsValid(opno))
+		if (!OidIsValid(opno))
+			continue;
+		/* If no barrier quals in query, don't worry about leaky operators */
+		if (ec->ec_max_security == 0)
+			return opno;
+		/* Otherwise, insist that selected operators be leakproof */
+		if (get_func_leakproof(get_opcode(opno)))
 			return opno;
 	}
 	return InvalidOid;
@@ -1361,7 +1425,8 @@ create_join_clause(PlannerInfo *root,
 										bms_union(leftem->em_relids,
 												  rightem->em_relids),
 										bms_union(leftem->em_nullable_relids,
-											   rightem->em_nullable_relids));
+												rightem->em_nullable_relids),
+										ec->ec_min_security);
 
 	/* Mark the clause as redundant, or not */
 	rinfo->parent_ec = parent_ec;
@@ -1672,7 +1737,8 @@ reconsider_outer_join_clause(PlannerInfo *root, RestrictInfo *rinfo,
 												   innervar,
 												   cur_em->em_expr,
 												   bms_copy(inner_relids),
-											bms_copy(inner_nullable_relids));
+											 bms_copy(inner_nullable_relids),
+												   cur_ec->ec_min_security);
 			if (process_equivalence(root, newrinfo, true))
 				match = true;
 		}
@@ -1814,7 +1880,8 @@ reconsider_full_join_clause(PlannerInfo *root, RestrictInfo *rinfo)
 													   leftvar,
 													   cur_em->em_expr,
 													   bms_copy(left_relids),
-											 bms_copy(left_nullable_relids));
+											  bms_copy(left_nullable_relids),
+													cur_ec->ec_min_security);
 				if (process_equivalence(root, newrinfo, true))
 					matchleft = true;
 			}
@@ -1828,7 +1895,8 @@ reconsider_full_join_clause(PlannerInfo *root, RestrictInfo *rinfo)
 													   rightvar,
 													   cur_em->em_expr,
 													   bms_copy(right_relids),
-											bms_copy(right_nullable_relids));
+											 bms_copy(right_nullable_relids),
+													cur_ec->ec_min_security);
 				if (process_equivalence(root, newrinfo, true))
 					matchright = true;
 			}
@@ -1903,6 +1971,85 @@ exprs_known_equal(PlannerInfo *root, Node *item1, Node *item2)
 		}
 	}
 	return false;
+}
+
+
+/*
+ * match_eclasses_to_foreign_key_col
+ *	  See whether a foreign key column match is proven by any eclass.
+ *
+ * If the referenced and referencing Vars of the fkey's colno'th column are
+ * known equal due to any eclass, return that eclass; otherwise return NULL.
+ * (In principle there might be more than one matching eclass if multiple
+ * collations are involved, but since collation doesn't matter for equality,
+ * we ignore that fine point here.)  This is much like exprs_known_equal,
+ * except that we insist on the comparison operator matching the eclass, so
+ * that the result is definite not approximate.
+ */
+EquivalenceClass *
+match_eclasses_to_foreign_key_col(PlannerInfo *root,
+								  ForeignKeyOptInfo *fkinfo,
+								  int colno)
+{
+	Index		var1varno = fkinfo->con_relid;
+	AttrNumber	var1attno = fkinfo->conkey[colno];
+	Index		var2varno = fkinfo->ref_relid;
+	AttrNumber	var2attno = fkinfo->confkey[colno];
+	Oid			eqop = fkinfo->conpfeqop[colno];
+	List	   *opfamilies = NIL;		/* compute only if needed */
+	ListCell   *lc1;
+
+	foreach(lc1, root->eq_classes)
+	{
+		EquivalenceClass *ec = (EquivalenceClass *) lfirst(lc1);
+		bool		item1member = false;
+		bool		item2member = false;
+		ListCell   *lc2;
+
+		/* Never match to a volatile EC */
+		if (ec->ec_has_volatile)
+			continue;
+		/* Note: it seems okay to match to "broken" eclasses here */
+
+		foreach(lc2, ec->ec_members)
+		{
+			EquivalenceMember *em = (EquivalenceMember *) lfirst(lc2);
+			Var		   *var;
+
+			if (em->em_is_child)
+				continue;		/* ignore children here */
+
+			/* EM must be a Var, possibly with RelabelType */
+			var = (Var *) em->em_expr;
+			while (var && IsA(var, RelabelType))
+				var = (Var *) ((RelabelType *) var)->arg;
+			if (!(var && IsA(var, Var)))
+				continue;
+
+			/* Match? */
+			if (var->varno == var1varno && var->varattno == var1attno)
+				item1member = true;
+			else if (var->varno == var2varno && var->varattno == var2attno)
+				item2member = true;
+
+			/* Have we found both PK and FK column in this EC? */
+			if (item1member && item2member)
+			{
+				/*
+				 * Succeed if eqop matches EC's opfamilies.  We could test
+				 * this before scanning the members, but it's probably cheaper
+				 * to test for member matches first.
+				 */
+				if (opfamilies == NIL)	/* compute if we didn't already */
+					opfamilies = get_mergejoin_opfamilies(eqop);
+				if (equal(opfamilies, ec->ec_opfamilies))
+					return ec;
+				/* Otherwise, done with this EC, move on to the next */
+				break;
+			}
+		}
+	}
+	return NULL;
 }
 
 
@@ -1993,48 +2140,6 @@ add_child_rel_equivalences(PlannerInfo *root,
 									 new_relids, new_nullable_relids,
 									 true, cur_em->em_datatype);
 			}
-		}
-	}
-}
-
-
-/*
- * mutate_eclass_expressions
- *	  Apply an expression tree mutator to all expressions stored in
- *	  equivalence classes (but ignore child exprs unless include_child_exprs).
- *
- * This is a bit of a hack ... it's currently needed only by planagg.c,
- * which needs to do a global search-and-replace of MIN/MAX Aggrefs
- * after eclasses are already set up.  Without changing the eclasses too,
- * subsequent matching of ORDER BY and DISTINCT clauses would fail.
- *
- * Note that we assume the mutation won't affect relation membership or any
- * other properties we keep track of (which is a bit bogus, but by the time
- * planagg.c runs, it no longer matters).  Also we must be called in the
- * main planner memory context.
- */
-void
-mutate_eclass_expressions(PlannerInfo *root,
-						  Node *(*mutator) (),
-						  void *context,
-						  bool include_child_exprs)
-{
-	ListCell   *lc1;
-
-	foreach(lc1, root->eq_classes)
-	{
-		EquivalenceClass *cur_ec = (EquivalenceClass *) lfirst(lc1);
-		ListCell   *lc2;
-
-		foreach(lc2, cur_ec->ec_members)
-		{
-			EquivalenceMember *cur_em = (EquivalenceMember *) lfirst(lc2);
-
-			if (cur_em->em_is_child && !include_child_exprs)
-				continue;		/* ignore children unless requested */
-
-			cur_em->em_expr = (Expr *)
-				mutator((Node *) cur_em->em_expr, context);
 		}
 	}
 }

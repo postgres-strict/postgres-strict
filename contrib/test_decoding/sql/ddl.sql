@@ -108,13 +108,16 @@ DELETE FROM tr_pkey;
 SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
 
 /*
- * check that disk spooling works
+ * check that disk spooling works (also for logical messages)
  */
 BEGIN;
 CREATE TABLE tr_etoomuch (id serial primary key, data int);
 INSERT INTO tr_etoomuch(data) SELECT g.i FROM generate_series(1, 10234) g(i);
+SELECT 'tx logical msg' FROM pg_logical_emit_message(true, 'test', 'tx logical msg');
 DELETE FROM tr_etoomuch WHERE id < 5000;
 UPDATE tr_etoomuch SET data = - data WHERE id > 5000;
+CREATE TABLE tr_oddlength (id text primary key, data text);
+INSERT INTO tr_oddlength VALUES('ab', 'foo');
 COMMIT;
 
 /* display results, but hide most of the output */
@@ -123,15 +126,29 @@ FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', 
 GROUP BY substring(data, 1, 24)
 ORDER BY 1,2;
 
+-- check updates of primary keys work correctly
+BEGIN;
+CREATE TABLE spoolme AS SELECT g.i FROM generate_series(1, 5000) g(i);
+UPDATE tr_etoomuch SET id = -id WHERE id = 5000;
+UPDATE tr_oddlength SET id = 'x', data = 'quux';
+UPDATE tr_oddlength SET id = 'yy', data = 'a';
+DELETE FROM spoolme;
+DROP TABLE spoolme;
+COMMIT;
+
+SELECT data
+FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1')
+WHERE data ~ 'UPDATE';
+
 -- check that a large, spooled, upsert works
 INSERT INTO tr_etoomuch (id, data)
 SELECT g.i, -g.i FROM generate_series(8000, 12000) g(i)
 ON CONFLICT(id) DO UPDATE SET data = EXCLUDED.data;
 
 SELECT substring(data, 1, 29), count(*)
-FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1')
+FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1') WITH ORDINALITY
 GROUP BY 1
-ORDER BY min(location - '0/0');
+ORDER BY min(ordinality);
 
 /*
  * check whether we decode subtransactions correctly in relation with each

@@ -3,7 +3,7 @@
  * orclauses.c
  *	  Routines to extract restriction OR clauses from join OR clauses
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -54,7 +54,7 @@ static void consider_new_or_clause(PlannerInfo *root, RelOptInfo *rel,
  * fault is not really in the transformation, but in clauselist_selectivity's
  * inability to recognize redundant conditions.)  We can compensate for this
  * redundancy by changing the cached selectivity of the original OR clause,
- * cancelling out the (valid) reduction in the estimated sizes of the base
+ * canceling out the (valid) reduction in the estimated sizes of the base
  * relations so that the estimated joinrel size remains the same.  This is
  * a MAJOR HACK: it depends on the fact that clause selectivities are cached
  * and on the fact that the same RestrictInfo node will appear in every
@@ -270,6 +270,7 @@ consider_new_or_clause(PlannerInfo *root, RelOptInfo *rel,
 								 true,
 								 false,
 								 false,
+								 join_or_rinfo->security_level,
 								 NULL,
 								 NULL,
 								 NULL);
@@ -296,6 +297,8 @@ consider_new_or_clause(PlannerInfo *root, RelOptInfo *rel,
 	 * OK, add it to the rel's restriction-clause list.
 	 */
 	rel->baserestrictinfo = lappend(rel->baserestrictinfo, or_rinfo);
+	rel->baserestrict_min_security = Min(rel->baserestrict_min_security,
+										 or_rinfo->security_level);
 
 	/*
 	 * Adjust the original join OR clause's cached selectivity to compensate

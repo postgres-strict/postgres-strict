@@ -9,7 +9,7 @@
  * storage management for portals (but doesn't run any queries in them).
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -27,7 +27,9 @@
 #include "commands/portalcmds.h"
 #include "executor/executor.h"
 #include "executor/tstoreReceiver.h"
+#include "rewrite/rewriteHandler.h"
 #include "tcop/pquery.h"
+#include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 
@@ -35,21 +37,16 @@
 /*
  * PerformCursorOpen
  *		Execute SQL DECLARE CURSOR command.
- *
- * The query has already been through parse analysis, rewriting, and planning.
- * When it gets here, it looks like a SELECT PlannedStmt, except that the
- * utilityStmt field is set.
  */
 void
-PerformCursorOpen(PlannedStmt *stmt, ParamListInfo params,
+PerformCursorOpen(DeclareCursorStmt *cstmt, ParamListInfo params,
 				  const char *queryString, bool isTopLevel)
 {
-	DeclareCursorStmt *cstmt = (DeclareCursorStmt *) stmt->utilityStmt;
+	Query	   *query = castNode(Query, cstmt->query);
+	List	   *rewritten;
+	PlannedStmt *plan;
 	Portal		portal;
 	MemoryContext oldContext;
-
-	if (cstmt == NULL || !IsA(cstmt, DeclareCursorStmt))
-		elog(ERROR, "PerformCursorOpen called for non-cursor query");
 
 	/*
 	 * Disallow empty-string cursor name (conflicts with protocol-level
@@ -69,14 +66,39 @@ PerformCursorOpen(PlannedStmt *stmt, ParamListInfo params,
 		RequireTransactionChain(isTopLevel, "DECLARE CURSOR");
 
 	/*
+	 * Parse analysis was done already, but we still have to run the rule
+	 * rewriter.  We do not do AcquireRewriteLocks: we assume the query either
+	 * came straight from the parser, or suitable locks were acquired by
+	 * plancache.c.
+	 *
+	 * Because the rewriter and planner tend to scribble on the input, we make
+	 * a preliminary copy of the source querytree.  This prevents problems in
+	 * the case that the DECLARE CURSOR is in a portal or plpgsql function and
+	 * is executed repeatedly.  (See also the same hack in EXPLAIN and
+	 * PREPARE.)  XXX FIXME someday.
+	 */
+	rewritten = QueryRewrite((Query *) copyObject(query));
+
+	/* SELECT should never rewrite to more or less than one query */
+	if (list_length(rewritten) != 1)
+		elog(ERROR, "non-SELECT statement in DECLARE CURSOR");
+
+	query = castNode(Query, linitial(rewritten));
+
+	if (query->commandType != CMD_SELECT)
+		elog(ERROR, "non-SELECT statement in DECLARE CURSOR");
+
+	/* Plan the query, applying the specified options */
+	plan = pg_plan_query(query, cstmt->options, params);
+
+	/*
 	 * Create a portal and copy the plan and queryString into its memory.
 	 */
 	portal = CreatePortal(cstmt->portalname, false, false);
 
 	oldContext = MemoryContextSwitchTo(PortalGetHeapMemory(portal));
 
-	stmt = copyObject(stmt);
-	stmt->utilityStmt = NULL;	/* make it look like plain SELECT */
+	plan = copyObject(plan);
 
 	queryString = pstrdup(queryString);
 
@@ -84,7 +106,7 @@ PerformCursorOpen(PlannedStmt *stmt, ParamListInfo params,
 					  NULL,
 					  queryString,
 					  "SELECT", /* cursor's query is always a SELECT */
-					  list_make1(stmt),
+					  list_make1(plan),
 					  NULL);
 
 	/*----------
@@ -111,8 +133,8 @@ PerformCursorOpen(PlannedStmt *stmt, ParamListInfo params,
 	portal->cursorOptions = cstmt->options;
 	if (!(portal->cursorOptions & (CURSOR_OPT_SCROLL | CURSOR_OPT_NO_SCROLL)))
 	{
-		if (stmt->rowMarks == NIL &&
-			ExecSupportsBackwardScan(stmt->planTree))
+		if (plan->rowMarks == NIL &&
+			ExecSupportsBackwardScan(plan->planTree))
 			portal->cursorOptions |= CURSOR_OPT_SCROLL;
 		else
 			portal->cursorOptions |= CURSOR_OPT_NO_SCROLL;
@@ -148,7 +170,7 @@ PerformPortalFetch(FetchStmt *stmt,
 				   char *completionTag)
 {
 	Portal		portal;
-	long		nprocessed;
+	uint64		nprocessed;
 
 	/*
 	 * Disallow empty-string cursor name (conflicts with protocol-level
@@ -181,7 +203,7 @@ PerformPortalFetch(FetchStmt *stmt,
 
 	/* Return command status if wanted */
 	if (completionTag)
-		snprintf(completionTag, COMPLETION_TAG_BUFSIZE, "%s %ld",
+		snprintf(completionTag, COMPLETION_TAG_BUFSIZE, "%s " UINT64_FORMAT,
 				 stmt->ismove ? "MOVE" : "FETCH",
 				 nprocessed);
 }
@@ -317,10 +339,11 @@ PersistHoldablePortal(Portal portal)
 	Assert(queryDesc != NULL);
 
 	/*
-	 * Caller must have created the tuplestore already.
+	 * Caller must have created the tuplestore already ... but not a snapshot.
 	 */
 	Assert(portal->holdContext != NULL);
 	Assert(portal->holdStore != NULL);
+	Assert(portal->holdSnapshot == NULL);
 
 	/*
 	 * Before closing down the executor, we must copy the tupdesc into
@@ -362,7 +385,8 @@ PersistHoldablePortal(Portal portal)
 
 		/*
 		 * Change the destination to output to the tuplestore.  Note we tell
-		 * the tuplestore receiver to detoast all data passed through it.
+		 * the tuplestore receiver to detoast all data passed through it; this
+		 * makes it safe to not keep a snapshot associated with the data.
 		 */
 		queryDesc->dest = CreateDestReceiver(DestTuplestore);
 		SetTuplestoreDestReceiverParams(queryDesc->dest,
@@ -392,20 +416,14 @@ PersistHoldablePortal(Portal portal)
 		if (portal->atEnd)
 		{
 			/*
-			 * We can handle this case even if posOverflow: just force the
-			 * tuplestore forward to its end.  The size of the skip request
-			 * here is arbitrary.
+			 * Just force the tuplestore forward to its end.  The size of the
+			 * skip request here is arbitrary.
 			 */
 			while (tuplestore_skiptuples(portal->holdStore, 1000000, true))
 				 /* continue */ ;
 		}
 		else
 		{
-			if (portal->posOverflow)	/* oops, cannot trust portalPos */
-				ereport(ERROR,
-						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						 errmsg("could not reposition held cursor")));
-
 			tuplestore_rescan(portal->holdStore);
 
 			if (!tuplestore_skiptuples(portal->holdStore,

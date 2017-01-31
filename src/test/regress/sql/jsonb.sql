@@ -352,6 +352,12 @@ SELECT jsonb_object_agg(name, type) FROM foo;
 
 -- jsonb_object
 
+-- empty object, one dimension
+SELECT jsonb_object('{}');
+
+-- empty object, two dimensions
+SELECT jsonb_object('{}', '{}');
+
 -- one dimension
 SELECT jsonb_object('{a,1,b,2,3,NULL,"d e f","a b c"}');
 
@@ -501,6 +507,14 @@ select * from jsonb_to_record('{"a":1,"b":"foo","c":"bar"}')
 
 select * from jsonb_to_recordset('[{"a":1,"b":"foo","d":false},{"a":2,"b":"bar","c":true}]')
     as x(a int, b text, c boolean);
+
+select *, c is null as c_is_null
+from jsonb_to_record('{"a":1, "b":{"c":16, "d":2}, "x":8}'::jsonb)
+    as t(a int, b jsonb, c text, x int);
+
+select *, c is null as c_is_null
+from jsonb_to_recordset('[{"a":1, "b":{"c":16, "d":2}, "x":8}]'::jsonb)
+    as t(a int, b jsonb, c text, x int);
 
 -- indexing
 SELECT count(*) FROM testjsonb WHERE j @> '{"wait":null}';
@@ -763,6 +777,10 @@ select '["a","b","c"]'::jsonb - -2;
 select '["a","b","c"]'::jsonb - -3;
 select '["a","b","c"]'::jsonb - -4;
 
+select '{"a":1 , "b":2, "c":3}'::jsonb - '{b}'::text[];
+select '{"a":1 , "b":2, "c":3}'::jsonb - '{c,b}'::text[];
+select '{"a":1 , "b":2, "c":3}'::jsonb - '{}'::text[];
+
 select jsonb_set('{"n":null, "a":1, "b":[1,2], "c":{"1":2}, "d":{"1":[2,3]}}'::jsonb, '{n}', '[1,2,3]');
 select jsonb_set('{"n":null, "a":1, "b":[1,2], "c":{"1":2}, "d":{"1":[2,3]}}'::jsonb, '{b,-1}', '[1,2,3]');
 select jsonb_set('{"n":null, "a":1, "b":[1,2], "c":{"1":2}, "d":{"1":[2,3]}}'::jsonb, '{d,1,0}', '[1,2,3]');
@@ -800,6 +818,7 @@ select '[]'::jsonb #- '{a}';
 select jsonb_set('"a"','{a}','"b"'); --error
 select jsonb_set('{}','{a}','"b"', false);
 select jsonb_set('[]','{1}','"b"', false);
+select jsonb_set('[{"f1":1,"f2":null},2,null,3]', '{0}','[2,3,4]', false);
 
 -- jsonb_set adding instead of replacing
 
@@ -823,3 +842,33 @@ select jsonb_set('[]','{-99}','{"foo":123}');
 select jsonb_set('{"a": [1, 2, 3]}', '{a, non_integer}', '"new_value"');
 select jsonb_set('{"a": {"b": [1, 2, 3]}}', '{a, b, non_integer}', '"new_value"');
 select jsonb_set('{"a": {"b": [1, 2, 3]}}', '{a, b, NULL}', '"new_value"');
+
+
+-- jsonb_insert
+select jsonb_insert('{"a": [0,1,2]}', '{a, 1}', '"new_value"');
+select jsonb_insert('{"a": [0,1,2]}', '{a, 1}', '"new_value"', true);
+select jsonb_insert('{"a": {"b": {"c": [0, 1, "test1", "test2"]}}}', '{a, b, c, 2}', '"new_value"');
+select jsonb_insert('{"a": {"b": {"c": [0, 1, "test1", "test2"]}}}', '{a, b, c, 2}', '"new_value"', true);
+select jsonb_insert('{"a": [0,1,2]}', '{a, 1}', '{"b": "value"}');
+select jsonb_insert('{"a": [0,1,2]}', '{a, 1}', '["value1", "value2"]');
+
+-- edge cases
+select jsonb_insert('{"a": [0,1,2]}', '{a, 0}', '"new_value"');
+select jsonb_insert('{"a": [0,1,2]}', '{a, 0}', '"new_value"', true);
+select jsonb_insert('{"a": [0,1,2]}', '{a, 2}', '"new_value"');
+select jsonb_insert('{"a": [0,1,2]}', '{a, 2}', '"new_value"', true);
+select jsonb_insert('{"a": [0,1,2]}', '{a, -1}', '"new_value"');
+select jsonb_insert('{"a": [0,1,2]}', '{a, -1}', '"new_value"', true);
+select jsonb_insert('[]', '{1}', '"new_value"');
+select jsonb_insert('[]', '{1}', '"new_value"', true);
+select jsonb_insert('{"a": []}', '{a, 1}', '"new_value"');
+select jsonb_insert('{"a": []}', '{a, 1}', '"new_value"', true);
+select jsonb_insert('{"a": [0,1,2]}', '{a, 10}', '"new_value"');
+select jsonb_insert('{"a": [0,1,2]}', '{a, -10}', '"new_value"');
+
+-- jsonb_insert should be able to insert new value for objects, but not to replace
+select jsonb_insert('{"a": {"b": "value"}}', '{a, c}', '"new_value"');
+select jsonb_insert('{"a": {"b": "value"}}', '{a, c}', '"new_value"', true);
+
+select jsonb_insert('{"a": {"b": "value"}}', '{a, b}', '"new_value"');
+select jsonb_insert('{"a": {"b": "value"}}', '{a, b}', '"new_value"', true);

@@ -2,6 +2,15 @@
 -- Tests for psql features that aren't closely connected to any
 -- specific server features
 --
+-- \set
+-- fail: invalid name
+\set invalid/name foo
+invalid variable name: "invalid/name"
+-- fail: invalid value for special variable
+\set AUTOCOMMIT foo
+unrecognized value "foo" for "AUTOCOMMIT": boolean expected
+\set FETCH_COUNT foo
+invalid value "foo" for "FETCH_COUNT": integer expected
 -- \gset
 select 10 as test01, 20 as test02, 'Hello' as test03 \gset pref01_
 \echo :pref01_test01 :pref01_test02 :pref01_test03
@@ -9,7 +18,7 @@ select 10 as test01, 20 as test02, 'Hello' as test03 \gset pref01_
 -- should fail: bad variable name
 select 10 as "bad name"
 \gset
-could not set variable "bad name"
+invalid variable name: "bad name"
 -- multiple backslash commands in one line
 select 1 as x, 2 as y \gset pref01_ \\ \echo :pref01_x
 1
@@ -52,6 +61,51 @@ more than one row returned for \gset
 select 10 as test01, 20 as test02 from generate_series(1,0) \gset
 no rows returned for \gset
 \unset FETCH_COUNT
+-- \gexec
+create temporary table gexec_test(a int, b text, c date, d float);
+select format('create index on gexec_test(%I)', attname)
+from pg_attribute
+where attrelid = 'gexec_test'::regclass and attnum > 0
+order by attnum
+\gexec
+create index on gexec_test(a)
+create index on gexec_test(b)
+create index on gexec_test(c)
+create index on gexec_test(d)
+-- \gexec should work in FETCH_COUNT mode too
+-- (though the fetch limit applies to the executed queries not the meta query)
+\set FETCH_COUNT 1
+select 'select 1 as ones', 'select x.y, x.y*2 as double from generate_series(1,4) as x(y)'
+union all
+select 'drop table gexec_test', NULL
+union all
+select 'drop table gexec_test', 'select ''2000-01-01''::date as party_over'
+\gexec
+select 1 as ones
+ ones 
+------
+    1
+(1 row)
+
+select x.y, x.y*2 as double from generate_series(1,4) as x(y)
+ y | double 
+---+--------
+ 1 |      2
+ 2 |      4
+ 3 |      6
+ 4 |      8
+(4 rows)
+
+drop table gexec_test
+drop table gexec_test
+ERROR:  table "gexec_test" does not exist
+select '2000-01-01'::date as party_over
+ party_over 
+------------
+ 01-01-2000
+(1 row)
+
+\unset FETCH_COUNT
 -- show all pset options
 \pset
 border                   1
@@ -78,7 +132,7 @@ unicode_header_linestyle single
 prepare q as select array_to_string(array_agg(repeat('x',2*n)),E'\n') as "ab
 
 c", array_to_string(array_agg(repeat('y',20-2*n)),E'\n') as "a
-bc" from generate_series(1,10) as n(n) group by n>1 ;
+bc" from generate_series(1,10) as n(n) group by n>1 order by n>1;
 \pset linestyle ascii
 \pset expanded off
 \pset columns 40
@@ -2431,6 +2485,7 @@ execute q;
 +------------------+-------------------+
 
 deallocate q;
+\pset linestyle ascii
 prepare q as select ' | = | lkjsafi\\/ /oeu rio)(!@&*#)*(!&@*) \ (&' as " | -- | 012345678 9abc def!*@#&!@(*&*~~_+-=\ \", '11' as "0123456789", 11 as int from generate_series(1,10) as n;
 \pset format asciidoc
 \pset expanded off
@@ -2637,6 +2692,9 @@ execute q;
 <l|int >l|11
 |====
 deallocate q;
+\pset format aligned
+\pset expanded off
+\pset border 1
 -- SHOW_CONTEXT
 \set SHOW_CONTEXT never
 do $$

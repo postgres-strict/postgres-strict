@@ -96,7 +96,7 @@ PostgreSQL documentation
       <term><option>--if-not-exists</option></term>
       <listitem>
        <para>
-        Do not not error out when <option>--create-slot</option> is specified
+        Do not error out when <option>--create-slot</option> is specified
         and a slot with the specified name already exists.
        </para>
       </listitem>
@@ -177,6 +177,19 @@ PostgreSQL documentation
       <listitem>
        <para>
         Enables verbose mode.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>-Z <replaceable class="parameter">level</replaceable></option></term>
+      <term><option>--compress=<replaceable class="parameter">level</replaceable></option></term>
+      <listitem>
+       <para>
+        Enables gzip compression of transaction logs, and specifies the
+        compression level (0 through 9, 0 being no compression and 9 being best
+        compression).  The suffix <filename>.gz</filename> will
+        automatically be added to all filenames.
        </para>
       </listitem>
      </varlistentry>

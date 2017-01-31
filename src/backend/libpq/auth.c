@@ -3,7 +3,7 @@
  * auth.c
  *	  Routines to handle network authentication
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,27 +20,44 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#ifdef HAVE_SYS_SELECT_H
+#include <sys/select.h>
+#endif
 
+#include "common/ip.h"
+#include "common/md5.h"
 #include "libpq/auth.h"
 #include "libpq/crypt.h"
-#include "libpq/ip.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
-#include "libpq/md5.h"
 #include "miscadmin.h"
 #include "replication/walsender.h"
 #include "storage/ipc.h"
+#include "utils/backend_random.h"
 
 
 /*----------------------------------------------------------------
  * Global authentication functions
  *----------------------------------------------------------------
  */
-static void sendAuthRequest(Port *port, AuthRequest areq);
+static void sendAuthRequest(Port *port, AuthRequest areq, char *extradata,
+				int extralen);
 static void auth_failed(Port *port, int status, char *logdetail);
 static char *recv_password_packet(Port *port);
-static int	recv_and_check_password_packet(Port *port, char **logdetail);
 
+
+/*----------------------------------------------------------------
+ * MD5 authentication
+ *----------------------------------------------------------------
+ */
+static int	CheckMD5Auth(Port *port, char **logdetail);
+
+/*----------------------------------------------------------------
+ * Plaintext password authentication
+ *----------------------------------------------------------------
+ */
+
+static int	CheckPasswordAuth(Port *port, char **logdetail);
 
 /*----------------------------------------------------------------
  * Ident authentication
@@ -86,6 +103,17 @@ static char *pam_passwd = NULL; /* Workaround for Solaris 2.6 brokenness */
 static Port *pam_port_cludge;	/* Workaround for passing "Port *port" into
 								 * pam_passwd_conv_proc */
 #endif   /* USE_PAM */
+
+
+/*----------------------------------------------------------------
+ * BSD authentication
+ *----------------------------------------------------------------
+ */
+#ifdef USE_BSD_AUTH
+#include <bsd_auth.h>
+
+static int	CheckBSDAuth(Port *port, char *user);
+#endif   /* USE_BSD_AUTH */
 
 
 /*----------------------------------------------------------------
@@ -155,15 +183,17 @@ typedef SECURITY_STATUS
 			(WINAPI * QUERY_SECURITY_CONTEXT_TOKEN_FN) (
 													   PCtxtHandle, void **);
 static int	pg_SSPI_recvauth(Port *port);
+static int pg_SSPI_make_upn(char *accountname,
+				 size_t accountnamesize,
+				 char *domainname,
+				 size_t domainnamesize,
+				 bool update_accountname);
 #endif
 
 /*----------------------------------------------------------------
  * RADIUS Authentication
  *----------------------------------------------------------------
  */
-#ifdef USE_OPENSSL
-#include <openssl/rand.h>
-#endif
 static int	CheckRADIUSAuth(Port *port);
 
 
@@ -258,6 +288,9 @@ auth_failed(Port *port, int status, char *logdetail)
 		case uaPAM:
 			errstr = gettext_noop("PAM authentication failed for user \"%s\"");
 			break;
+		case uaBSD:
+			errstr = gettext_noop("BSD authentication failed for user \"%s\"");
+			break;
 		case uaLDAP:
 			errstr = gettext_noop("LDAP authentication failed for user \"%s\"");
 			break;
@@ -315,28 +348,22 @@ ClientAuthentication(Port *port)
 	 */
 	if (port->hba->clientcert)
 	{
+		/* If we haven't loaded a root certificate store, fail */
+		if (!secure_loaded_verify_locations())
+			ereport(FATAL,
+					(errcode(ERRCODE_CONFIG_FILE_ERROR),
+					 errmsg("client certificates can only be checked if a root certificate store is available")));
+
 		/*
-		 * When we parse pg_hba.conf, we have already made sure that we have
-		 * been able to load a certificate store. Thus, if a certificate is
-		 * present on the client, it has been verified against our root
+		 * If we loaded a root certificate store, and if a certificate is
+		 * present on the client, then it has been verified against our root
 		 * certificate store, and the connection would have been aborted
 		 * already if it didn't verify ok.
 		 */
-#ifdef USE_SSL
 		if (!port->peer_cert_valid)
-		{
 			ereport(FATAL,
 					(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
 				  errmsg("connection requires a valid client certificate")));
-		}
-#else
-
-		/*
-		 * hba.c makes sure hba->clientcert can't be set unless OpenSSL is
-		 * present.
-		 */
-		Assert(false);
-#endif
 	}
 
 	/*
@@ -479,7 +506,7 @@ ClientAuthentication(Port *port)
 
 		case uaGSS:
 #ifdef ENABLE_GSS
-			sendAuthRequest(port, AUTH_REQ_GSS);
+			sendAuthRequest(port, AUTH_REQ_GSS, NULL, 0);
 			status = pg_GSS_recvauth(port);
 #else
 			Assert(false);
@@ -488,7 +515,7 @@ ClientAuthentication(Port *port)
 
 		case uaSSPI:
 #ifdef ENABLE_SSPI
-			sendAuthRequest(port, AUTH_REQ_SSPI);
+			sendAuthRequest(port, AUTH_REQ_SSPI, NULL, 0);
 			status = pg_SSPI_recvauth(port);
 #else
 			Assert(false);
@@ -508,17 +535,11 @@ ClientAuthentication(Port *port)
 			break;
 
 		case uaMD5:
-			if (Db_user_namespace)
-				ereport(FATAL,
-						(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
-						 errmsg("MD5 authentication is not supported when \"db_user_namespace\" is enabled")));
-			sendAuthRequest(port, AUTH_REQ_MD5);
-			status = recv_and_check_password_packet(port, &logdetail);
+			status = CheckMD5Auth(port, &logdetail);
 			break;
 
 		case uaPassword:
-			sendAuthRequest(port, AUTH_REQ_PASSWORD);
-			status = recv_and_check_password_packet(port, &logdetail);
+			status = CheckPasswordAuth(port, &logdetail);
 			break;
 
 		case uaPAM:
@@ -527,6 +548,14 @@ ClientAuthentication(Port *port)
 #else
 			Assert(false);
 #endif   /* USE_PAM */
+			break;
+
+		case uaBSD:
+#ifdef USE_BSD_AUTH
+			status = CheckBSDAuth(port, port->user_name);
+#else
+			Assert(false);
+#endif   /* USE_BSD_AUTH */
 			break;
 
 		case uaLDAP:
@@ -556,7 +585,7 @@ ClientAuthentication(Port *port)
 		(*ClientAuthentication_hook) (port, status);
 
 	if (status == STATUS_OK)
-		sendAuthRequest(port, AUTH_REQ_OK);
+		sendAuthRequest(port, AUTH_REQ_OK, NULL, 0);
 	else
 		auth_failed(port, status, logdetail);
 }
@@ -566,7 +595,7 @@ ClientAuthentication(Port *port)
  * Send an authentication request packet to the frontend.
  */
 static void
-sendAuthRequest(Port *port, AuthRequest areq)
+sendAuthRequest(Port *port, AuthRequest areq, char *extradata, int extralen)
 {
 	StringInfoData buf;
 
@@ -574,28 +603,8 @@ sendAuthRequest(Port *port, AuthRequest areq)
 
 	pq_beginmessage(&buf, 'R');
 	pq_sendint(&buf, (int32) areq, sizeof(int32));
-
-	/* Add the salt for encrypted passwords. */
-	if (areq == AUTH_REQ_MD5)
-		pq_sendbytes(&buf, port->md5Salt, 4);
-
-#if defined(ENABLE_GSS) || defined(ENABLE_SSPI)
-
-	/*
-	 * Add the authentication data for the next step of the GSSAPI or SSPI
-	 * negotiation.
-	 */
-	else if (areq == AUTH_REQ_GSS_CONT)
-	{
-		if (port->gss->outbuf.length > 0)
-		{
-			elog(DEBUG4, "sending GSS token of length %u",
-				 (unsigned int) port->gss->outbuf.length);
-
-			pq_sendbytes(&buf, port->gss->outbuf.value, port->gss->outbuf.length);
-		}
-	}
-#endif
+	if (extralen > 0)
+		pq_sendbytes(&buf, extradata, extralen);
 
 	pq_endmessage(&buf);
 
@@ -684,24 +693,70 @@ recv_password_packet(Port *port)
  *----------------------------------------------------------------
  */
 
-/*
- * Called when we have sent an authorization request for a password.
- * Get the response and check it.
- * On error, optionally store a detail string at *logdetail.
- */
 static int
-recv_and_check_password_packet(Port *port, char **logdetail)
+CheckMD5Auth(Port *port, char **logdetail)
 {
+	char		md5Salt[4];		/* Password salt */
 	char	   *passwd;
+	char	   *shadow_pass;
 	int			result;
 
-	passwd = recv_password_packet(port);
+	if (Db_user_namespace)
+		ereport(FATAL,
+				(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+				 errmsg("MD5 authentication is not supported when \"db_user_namespace\" is enabled")));
 
+	/* include the salt to use for computing the response */
+	if (!pg_backend_random(md5Salt, 4))
+	{
+		ereport(LOG,
+				(errmsg("could not generate random MD5 salt")));
+		return STATUS_ERROR;
+	}
+
+	sendAuthRequest(port, AUTH_REQ_MD5, md5Salt, 4);
+
+	passwd = recv_password_packet(port);
 	if (passwd == NULL)
 		return STATUS_EOF;		/* client wouldn't send password */
 
-	result = md5_crypt_verify(port, port->user_name, passwd, logdetail);
+	result = get_role_password(port->user_name, &shadow_pass, logdetail);
+	if (result == STATUS_OK)
+		result = md5_crypt_verify(port->user_name, shadow_pass, passwd,
+								  md5Salt, 4, logdetail);
 
+	if (shadow_pass)
+		pfree(shadow_pass);
+	pfree(passwd);
+
+	return result;
+}
+
+/*----------------------------------------------------------------
+ * Plaintext password authentication
+ *----------------------------------------------------------------
+ */
+
+static int
+CheckPasswordAuth(Port *port, char **logdetail)
+{
+	char	   *passwd;
+	int			result;
+	char	   *shadow_pass;
+
+	sendAuthRequest(port, AUTH_REQ_PASSWORD, NULL, 0);
+
+	passwd = recv_password_packet(port);
+	if (passwd == NULL)
+		return STATUS_EOF;		/* client wouldn't send password */
+
+	result = get_role_password(port->user_name, &shadow_pass, logdetail);
+	if (result == STATUS_OK)
+		result = plain_crypt_verify(port->user_name, shadow_pass, passwd,
+									logdetail);
+
+	if (shadow_pass)
+		pfree(shadow_pass);
 	pfree(passwd);
 
 	return result;
@@ -838,7 +893,7 @@ pg_GSS_recvauth(Port *port)
 
 	/*
 	 * Loop through GSSAPI message exchange. This exchange can consist of
-	 * multiple messags sent in both directions. First message is always from
+	 * multiple messages sent in both directions. First message is always from
 	 * the client. All messages from client to server are password packets
 	 * (type 'p').
 	 */
@@ -907,7 +962,8 @@ pg_GSS_recvauth(Port *port)
 			elog(DEBUG4, "sending GSS response token of length %u",
 				 (unsigned int) port->gss->outbuf.length);
 
-			sendAuthRequest(port, AUTH_REQ_GSS_CONT);
+			sendAuthRequest(port, AUTH_REQ_GSS_CONT,
+						  port->gss->outbuf.value, port->gss->outbuf.length);
 
 			gss_release_buffer(&lmin_s, &port->gss->outbuf);
 		}
@@ -1011,7 +1067,9 @@ pg_SSPI_error(int severity, const char *errmsg, SECURITY_STATUS r)
 {
 	char		sysmsg[256];
 
-	if (FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, r, 0,
+	if (FormatMessage(FORMAT_MESSAGE_IGNORE_INSERTS |
+					  FORMAT_MESSAGE_FROM_SYSTEM,
+					  NULL, r, 0,
 					  sysmsg, sizeof(sysmsg), NULL) == 0)
 		ereport(severity,
 				(errmsg_internal("%s", errmsg),
@@ -1078,7 +1136,7 @@ pg_SSPI_recvauth(Port *port)
 
 	/*
 	 * Loop through SSPI message exchange. This exchange can consist of
-	 * multiple messags sent in both directions. First message is always from
+	 * multiple messages sent in both directions. First message is always from
 	 * the client. All messages from client to server are password packets
 	 * (type 'p').
 	 */
@@ -1150,7 +1208,8 @@ pg_SSPI_recvauth(Port *port)
 			port->gss->outbuf.length = outbuf.pBuffers[0].cbBuffer;
 			port->gss->outbuf.value = outbuf.pBuffers[0].pvBuffer;
 
-			sendAuthRequest(port, AUTH_REQ_GSS_CONT);
+			sendAuthRequest(port, AUTH_REQ_GSS_CONT,
+						  port->gss->outbuf.value, port->gss->outbuf.length);
 
 			FreeContextBuffer(outbuf.pBuffers[0].pvBuffer);
 		}
@@ -1240,8 +1299,8 @@ pg_SSPI_recvauth(Port *port)
 
 	if (!GetTokenInformation(token, TokenUser, NULL, 0, &retlen) && GetLastError() != 122)
 		ereport(ERROR,
-			(errmsg_internal("could not get token user size: error code %lu",
-							 GetLastError())));
+				(errmsg_internal("could not get token information buffer size: error code %lu",
+								 GetLastError())));
 
 	tokenuser = malloc(retlen);
 	if (tokenuser == NULL)
@@ -1250,8 +1309,8 @@ pg_SSPI_recvauth(Port *port)
 
 	if (!GetTokenInformation(token, TokenUser, tokenuser, retlen, &retlen))
 		ereport(ERROR,
-				(errmsg_internal("could not get user token: error code %lu",
-								 GetLastError())));
+		  (errmsg_internal("could not get token information: error code %lu",
+						   GetLastError())));
 
 	CloseHandle(token);
 
@@ -1262,6 +1321,17 @@ pg_SSPI_recvauth(Port *port)
 							 GetLastError())));
 
 	free(tokenuser);
+
+	if (!port->hba->compat_realm)
+	{
+		int			status = pg_SSPI_make_upn(accountname, sizeof(accountname),
+											  domainname, sizeof(domainname),
+											  port->hba->upn_username);
+
+		if (status != STATUS_OK)
+			/* Error already reported from pg_SSPI_make_upn */
+			return status;
+	}
 
 	/*
 	 * Compare realm/domain if requested. In SSPI, always compare case
@@ -1297,6 +1367,100 @@ pg_SSPI_recvauth(Port *port)
 	}
 	else
 		return check_usermap(port->hba->usermap, port->user_name, accountname, true);
+}
+
+/*
+ * Replaces the domainname with the Kerberos realm name,
+ * and optionally the accountname with the Kerberos user name.
+ */
+static int
+pg_SSPI_make_upn(char *accountname,
+				 size_t accountnamesize,
+				 char *domainname,
+				 size_t domainnamesize,
+				 bool update_accountname)
+{
+	char	   *samname;
+	char	   *upname = NULL;
+	char	   *p = NULL;
+	ULONG		upnamesize = 0;
+	size_t		upnamerealmsize;
+	BOOLEAN		res;
+
+	/*
+	 * Build SAM name (DOMAIN\user), then translate to UPN
+	 * (user@kerberos.realm). The realm name is returned in lower case, but
+	 * that is fine because in SSPI auth, string comparisons are always
+	 * case-insensitive.
+	 */
+
+	samname = psprintf("%s\\%s", domainname, accountname);
+	res = TranslateName(samname, NameSamCompatible, NameUserPrincipal,
+						NULL, &upnamesize);
+
+	if ((!res && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+		|| upnamesize == 0)
+	{
+		pfree(samname);
+		ereport(LOG,
+				(errcode(ERRCODE_INVALID_ROLE_SPECIFICATION),
+				 errmsg("could not translate name")));
+		return STATUS_ERROR;
+	}
+
+	/* upnamesize includes the terminating NUL. */
+	upname = palloc(upnamesize);
+
+	res = TranslateName(samname, NameSamCompatible, NameUserPrincipal,
+						upname, &upnamesize);
+
+	pfree(samname);
+	if (res)
+		p = strchr(upname, '@');
+
+	if (!res || p == NULL)
+	{
+		pfree(upname);
+		ereport(LOG,
+				(errcode(ERRCODE_INVALID_ROLE_SPECIFICATION),
+				 errmsg("could not translate name")));
+		return STATUS_ERROR;
+	}
+
+	/* Length of realm name after the '@', including the NUL. */
+	upnamerealmsize = upnamesize - (p - upname + 1);
+
+	/* Replace domainname with realm name. */
+	if (upnamerealmsize > domainnamesize)
+	{
+		pfree(upname);
+		ereport(LOG,
+				(errcode(ERRCODE_INVALID_ROLE_SPECIFICATION),
+				 errmsg("realm name too long")));
+		return STATUS_ERROR;
+	}
+
+	/* Length is now safe. */
+	strcpy(domainname, p + 1);
+
+	/* Replace account name as well (in case UPN != SAM)? */
+	if (update_accountname)
+	{
+		if ((p - upname + 1) > accountnamesize)
+		{
+			pfree(upname);
+			ereport(LOG,
+					(errcode(ERRCODE_INVALID_ROLE_SPECIFICATION),
+					 errmsg("translated account name too long")));
+			return STATUS_ERROR;
+		}
+
+		*p = 0;
+		strcpy(accountname, upname);
+	}
+
+	pfree(upname);
+	return STATUS_OK;
 }
 #endif   /* ENABLE_SSPI */
 
@@ -1673,7 +1837,7 @@ pam_passwd_conv_proc(int num_msg, const struct pam_message ** msg,
 					 * let's go ask the client to send a password, which we
 					 * then stuff into PAM.
 					 */
-					sendAuthRequest(pam_port_cludge, AUTH_REQ_PASSWORD);
+					sendAuthRequest(pam_port_cludge, AUTH_REQ_PASSWORD, NULL, 0);
 					passwd = recv_password_packet(pam_port_cludge);
 					if (passwd == NULL)
 					{
@@ -1737,6 +1901,18 @@ CheckPAMAuth(Port *port, char *user, char *password)
 {
 	int			retval;
 	pam_handle_t *pamh = NULL;
+	char		hostinfo[NI_MAXHOST];
+
+	retval = pg_getnameinfo_all(&port->raddr.addr, port->raddr.salen,
+								hostinfo, sizeof(hostinfo), NULL, 0,
+		  port->hba->pam_use_hostname ? 0 : NI_NUMERICHOST | NI_NUMERICSERV);
+	if (retval != 0)
+	{
+		ereport(WARNING,
+				(errmsg_internal("pg_getnameinfo_all() failed: %s",
+								 gai_strerror(retval))));
+		return STATUS_ERROR;
+	}
 
 	/*
 	 * We can't entirely rely on PAM to pass through appdata --- it appears
@@ -1779,6 +1955,17 @@ CheckPAMAuth(Port *port, char *user, char *password)
 				(errmsg("pam_set_item(PAM_USER) failed: %s",
 						pam_strerror(pamh, retval))));
 		pam_passwd = NULL;		/* Unset pam_passwd */
+		return STATUS_ERROR;
+	}
+
+	retval = pam_set_item(pamh, PAM_RHOST, hostinfo);
+
+	if (retval != PAM_SUCCESS)
+	{
+		ereport(LOG,
+				(errmsg("pam_set_item(PAM_RHOST) failed: %s",
+						pam_strerror(pamh, retval))));
+		pam_passwd = NULL;
 		return STATUS_ERROR;
 	}
 
@@ -1830,6 +2017,38 @@ CheckPAMAuth(Port *port, char *user, char *password)
 }
 #endif   /* USE_PAM */
 
+
+/*----------------------------------------------------------------
+ * BSD authentication system
+ *----------------------------------------------------------------
+ */
+#ifdef USE_BSD_AUTH
+static int
+CheckBSDAuth(Port *port, char *user)
+{
+	char	   *passwd;
+	int			retval;
+
+	/* Send regular password request to client, and get the response */
+	sendAuthRequest(port, AUTH_REQ_PASSWORD);
+
+	passwd = recv_password_packet(port);
+	if (passwd == NULL)
+		return STATUS_EOF;
+
+	/*
+	 * Ask the BSD auth system to verify password.  Note that auth_userokay
+	 * will overwrite the password string with zeroes, but it's just a
+	 * temporary string so we don't care.
+	 */
+	retval = auth_userokay(user, NULL, "auth-postgresql", passwd);
+
+	if (!retval)
+		return STATUS_ERROR;
+
+	return STATUS_OK;
+}
+#endif   /* USE_BSD_AUTH */
 
 
 /*----------------------------------------------------------------
@@ -1948,7 +2167,7 @@ CheckLDAPAuth(Port *port)
 	if (port->hba->ldapport == 0)
 		port->hba->ldapport = LDAP_PORT;
 
-	sendAuthRequest(port, AUTH_REQ_PASSWORD);
+	sendAuthRequest(port, AUTH_REQ_PASSWORD, NULL, 0);
 
 	passwd = recv_password_packet(port);
 	if (passwd == NULL)
@@ -2308,7 +2527,7 @@ CheckRADIUSAuth(Port *port)
 		identifier = port->hba->radiusidentifier;
 
 	/* Send regular password request to client, and get the response */
-	sendAuthRequest(port, AUTH_REQ_PASSWORD);
+	sendAuthRequest(port, AUTH_REQ_PASSWORD, NULL, 0);
 
 	passwd = recv_password_packet(port);
 	if (passwd == NULL)
@@ -2332,29 +2551,22 @@ CheckRADIUSAuth(Port *port)
 	/* Construct RADIUS packet */
 	packet->code = RADIUS_ACCESS_REQUEST;
 	packet->length = RADIUS_HEADER_LENGTH;
-#ifdef USE_OPENSSL
-	if (RAND_bytes(packet->vector, RADIUS_VECTOR_LENGTH) != 1)
+	if (!pg_backend_random((char *) packet->vector, RADIUS_VECTOR_LENGTH))
 	{
 		ereport(LOG,
 				(errmsg("could not generate random encryption vector")));
 		return STATUS_ERROR;
 	}
-#else
-	for (i = 0; i < RADIUS_VECTOR_LENGTH; i++)
-		/* Use a lower strengh random number of OpenSSL is not available */
-		packet->vector[i] = random() % 255;
-#endif
 	packet->id = packet->vector[0];
 	radius_add_attribute(packet, RADIUS_SERVICE_TYPE, (unsigned char *) &service, sizeof(service));
 	radius_add_attribute(packet, RADIUS_USER_NAME, (unsigned char *) port->user_name, strlen(port->user_name));
 	radius_add_attribute(packet, RADIUS_NAS_IDENTIFIER, (unsigned char *) identifier, strlen(identifier));
 
 	/*
-	 * RADIUS password attributes are calculated as:
-	 *   e[0] = p[0] XOR MD5(secret + Request Authenticator)
-	 * for the first group of 16 octets, and then:
-	 *   e[i] = p[i] XOR MD5(secret + e[i-1])
-	 * for the following ones (if necessary)
+	 * RADIUS password attributes are calculated as: e[0] = p[0] XOR
+	 * MD5(secret + Request Authenticator) for the first group of 16 octets,
+	 * and then: e[i] = p[i] XOR MD5(secret + e[i-1]) for the following ones
+	 * (if necessary)
 	 */
 	encryptedpasswordlen = ((strlen(passwd) + RADIUS_VECTOR_LENGTH - 1) / RADIUS_VECTOR_LENGTH) * RADIUS_VECTOR_LENGTH;
 	cryptvector = palloc(strlen(port->hba->radiussecret) + RADIUS_VECTOR_LENGTH);
@@ -2365,7 +2577,11 @@ CheckRADIUSAuth(Port *port)
 	for (i = 0; i < encryptedpasswordlen; i += RADIUS_VECTOR_LENGTH)
 	{
 		memcpy(cryptvector + strlen(port->hba->radiussecret), md5trailer, RADIUS_VECTOR_LENGTH);
-		/* .. and for subsequent iterations the result of the previous XOR (calculated below) */
+
+		/*
+		 * .. and for subsequent iterations the result of the previous XOR
+		 * (calculated below)
+		 */
 		md5trailer = encryptedpassword + i;
 
 		if (!pg_md5_binary(cryptvector, strlen(port->hba->radiussecret) + RADIUS_VECTOR_LENGTH, encryptedpassword + i))
@@ -2376,7 +2592,7 @@ CheckRADIUSAuth(Port *port)
 			return STATUS_ERROR;
 		}
 
-		for (j = i; j < i+RADIUS_VECTOR_LENGTH; j++)
+		for (j = i; j < i + RADIUS_VECTOR_LENGTH; j++)
 		{
 			if (j < strlen(passwd))
 				encryptedpassword[j] = passwd[j] ^ encryptedpassword[j];

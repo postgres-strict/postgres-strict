@@ -124,7 +124,9 @@ pg_buffercache_pages(PG_FUNCTION_ARGS)
 		fctx->tupdesc = BlessTupleDesc(tupledesc);
 
 		/* Allocate NBuffers worth of BufferCachePagesRec records. */
-		fctx->record = (BufferCachePagesRec *) palloc(sizeof(BufferCachePagesRec) * NBuffers);
+		fctx->record = (BufferCachePagesRec *)
+			MemoryContextAllocHuge(CurrentMemoryContext,
+								   sizeof(BufferCachePagesRec) * NBuffers);
 
 		/* Set max calls and remember the user function context. */
 		funcctx->max_calls = NBuffers;
@@ -134,25 +136,21 @@ pg_buffercache_pages(PG_FUNCTION_ARGS)
 		MemoryContextSwitchTo(oldcontext);
 
 		/*
-		 * To get a consistent picture of the buffer state, we must lock all
-		 * partitions of the buffer map.  Needless to say, this is horrible
-		 * for concurrency.  Must grab locks in increasing order to avoid
-		 * possible deadlocks.
-		 */
-		for (i = 0; i < NUM_BUFFER_PARTITIONS; i++)
-			LWLockAcquire(BufMappingPartitionLockByIndex(i), LW_SHARED);
-
-		/*
 		 * Scan through all the buffers, saving the relevant fields in the
 		 * fctx->record structure.
+		 *
+		 * We don't hold the partition locks, so we don't get a consistent
+		 * snapshot across all buffers, but we do grab the buffer header
+		 * locks, so the information of each buffer is self-consistent.
 		 */
 		for (i = 0; i < NBuffers; i++)
 		{
-			volatile BufferDesc *bufHdr;
+			BufferDesc *bufHdr;
+			uint32		buf_state;
 
 			bufHdr = GetBufferDescriptor(i);
 			/* Lock each buffer header before inspecting. */
-			LockBufHdr(bufHdr);
+			buf_state = LockBufHdr(bufHdr);
 
 			fctx->record[i].bufferid = BufferDescriptorGetBuffer(bufHdr);
 			fctx->record[i].relfilenode = bufHdr->tag.rnode.relNode;
@@ -160,32 +158,22 @@ pg_buffercache_pages(PG_FUNCTION_ARGS)
 			fctx->record[i].reldatabase = bufHdr->tag.rnode.dbNode;
 			fctx->record[i].forknum = bufHdr->tag.forkNum;
 			fctx->record[i].blocknum = bufHdr->tag.blockNum;
-			fctx->record[i].usagecount = bufHdr->usage_count;
-			fctx->record[i].pinning_backends = bufHdr->refcount;
+			fctx->record[i].usagecount = BUF_STATE_GET_USAGECOUNT(buf_state);
+			fctx->record[i].pinning_backends = BUF_STATE_GET_REFCOUNT(buf_state);
 
-			if (bufHdr->flags & BM_DIRTY)
+			if (buf_state & BM_DIRTY)
 				fctx->record[i].isdirty = true;
 			else
 				fctx->record[i].isdirty = false;
 
 			/* Note if the buffer is valid, and has storage created */
-			if ((bufHdr->flags & BM_VALID) && (bufHdr->flags & BM_TAG_VALID))
+			if ((buf_state & BM_VALID) && (buf_state & BM_TAG_VALID))
 				fctx->record[i].isvalid = true;
 			else
 				fctx->record[i].isvalid = false;
 
-			UnlockBufHdr(bufHdr);
+			UnlockBufHdr(bufHdr, buf_state);
 		}
-
-		/*
-		 * And release locks.  We do this in reverse order for two reasons:
-		 * (1) Anyone else who needs more than one of the locks will be trying
-		 * to lock them in increasing order; we don't want to release the
-		 * other process until it can get all the locks it needs. (2) This
-		 * avoids O(N^2) behavior inside LWLockRelease.
-		 */
-		for (i = NUM_BUFFER_PARTITIONS; --i >= 0;)
-			LWLockRelease(BufMappingPartitionLockByIndex(i));
 	}
 
 	funcctx = SRF_PERCALL_SETUP();

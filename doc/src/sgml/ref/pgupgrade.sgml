@@ -345,7 +345,7 @@ NET STOP postgresql-9.0
      your old cluster
      once you start the new cluster after the upgrade.  Link mode also
      requires that the old and new cluster data directories be in the
-     same file system.  (Tablespaces and <filename>pg_xlog</> can be on
+     same file system.  (Tablespaces and <filename>pg_wal</> can be on
      different file systems.)  See <literal>pg_upgrade --help</> for a full
      list of options.
     </para>
@@ -410,8 +410,7 @@ pg_upgrade.exe
    </step>
 
    <step>
-    <title>Upgrade Streaming Replication and Log-Shipping standby
-    servers</title>
+    <title>Upgrade Streaming Replication and Log-Shipping standby servers</title>
 
     <para>
      If you have Streaming Replication (see <xref
@@ -434,8 +433,7 @@ pg_upgrade.exe
      </step>
 
      <step>
-      <title>Make sure the new standby data directories do <emphasis>not</>
-      exist</title>
+      <title>Make sure the new standby data directories do <emphasis>not</> exist</title>
 
       <para>
        Make sure the new standby data directories do <emphasis>not</>
@@ -477,7 +475,7 @@ pg_upgrade.exe
 
       <para>
        In the new master cluster, change <varname>wal_level</> to
-       <literal>hot_standby</> in the <filename>postgresql.conf</> file
+       <literal>replica</> in the <filename>postgresql.conf</> file
        and then start and stop the cluster.
       </para>
      </step>
@@ -503,19 +501,20 @@ rsync --archive --delete --hard-links --size-only old_pgdata new_pgdata remote_d
        <application>rsync</> will be fast when <application>pg_upgrade</>'s
        <option>--link</> mode is used because it will create hard links
        on the remote server rather than transferring user data.
+       Unfortunately, <application>rsync</> needlessly copies the
+       files associated with temporary and unlogged tables.
       </para>
 
       <para>
        If you have tablespaces, you will need to run a similar
        <application>rsync</> command for each tablespace directory.  If you
-       have relocated <filename>pg_xlog</> outside the data directories,
+       have relocated <filename>pg_wal</> outside the data directories,
        <application>rsync</> must be run on those directories too.
       </para>
      </step>
 
      <step>
-      <title>Configure streaming replication and log-shipping standby
-      servers</title>
+      <title>Configure streaming replication and log-shipping standby servers</title>
 
       <para>
        Configure the servers for log shipping.  (You do not need to run
@@ -559,7 +558,7 @@ rsync --archive --delete --hard-links --size-only old_pgdata new_pgdata remote_d
      run using:
 
 <programlisting>
-psql --username postgres --file script.sql postgres
+psql --username=postgres --file=script.sql postgres
 </programlisting>
 
      The scripts can be run in any order and can be deleted once they have

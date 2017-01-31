@@ -11,8 +11,8 @@ CREATE FUNCTION stupidn() RETURNS text AS 'return "zarkon"' LANGUAGE plpython2u;
 
 select stupidn();
 
--- test multiple arguments
-CREATE FUNCTION argument_test_one(u users, a1 text, a2 text) RETURNS text
+-- test multiple arguments and odd characters in function name
+CREATE FUNCTION "Argument test #1"(u users, a1 text, a2 text) RETURNS text
 	AS
 'keys = list(u.keys())
 keys.sort()
@@ -23,21 +23,20 @@ words = a1 + " " + a2 + " => {" + ", ".join(out) + "}"
 return words'
 	LANGUAGE plpythonu;
 
-select argument_test_one(users, fname, lname) from users where lname = 'doe' order by 1;
+select "Argument test #1"(users, fname, lname) from users where lname = 'doe' order by 1;
 
 
 -- check module contents
-CREATE FUNCTION module_contents() RETURNS text AS
+CREATE FUNCTION module_contents() RETURNS SETOF text AS
 $$
 contents = list(filter(lambda x: not x.startswith("__"), dir(plpy)))
 contents.sort()
-return ", ".join(contents)
+return contents
 $$ LANGUAGE plpythonu;
 
 select module_contents();
 
-
-CREATE FUNCTION elog_test() RETURNS void
+CREATE FUNCTION elog_test_basic() RETURNS void
 AS $$
 plpy.debug('debug')
 plpy.log('log')
@@ -50,4 +49,4 @@ plpy.warning('warning')
 plpy.error('error')
 $$ LANGUAGE plpythonu;
 
-SELECT elog_test();
+SELECT elog_test_basic();

@@ -1,7 +1,7 @@
 # TestLib, low-level routines and actions regression tests.
 #
 # This module contains a set of routines dedicated to environment setup for
-# a PostgreSQL regression test tun, and includes some low-level routines
+# a PostgreSQL regression test run and includes some low-level routines
 # aimed at controlling command execution, logging and test functions. This
 # module should never depend on any other PostgreSQL regression test modules.
 
@@ -20,6 +20,7 @@ use SimpleTee;
 use Test::More;
 
 our @EXPORT = qw(
+  generate_ascii_string
   slurp_dir
   slurp_file
   append_to_file
@@ -34,6 +35,7 @@ our @EXPORT = qw(
   program_version_ok
   program_options_handling_ok
   command_like
+  command_fails_like
 
   $windows_os
 );
@@ -59,6 +61,8 @@ BEGIN
 	delete $ENV{PGUSER};
 	delete $ENV{PGPORT};
 	delete $ENV{PGHOST};
+
+	$ENV{PGAPPNAME} = $0;
 
 	# Must be set early
 	$windows_os = $Config{osname} eq 'MSWin32' || $Config{osname} eq 'msys';
@@ -107,14 +111,33 @@ INIT
 	autoflush TESTLOG 1;
 }
 
+END
+{
+
+	# Preserve temporary directory for this test on failure
+	$File::Temp::KEEP_ALL = 1 unless all_tests_passing();
+}
+
+sub all_tests_passing
+{
+	my $fail_count = 0;
+	foreach my $status (Test::More->builder->summary)
+	{
+		return 0 unless $status;
+	}
+	return 1;
+}
+
 #
 # Helper functions
 #
 sub tempdir
 {
+	my ($prefix) = @_;
+	$prefix = "tmp_test" unless defined $prefix;
 	return File::Temp::tempdir(
-		'tmp_testXXXX',
-		DIR => $tmp_check,
+		$prefix . '_XXXX',
+		DIR     => $tmp_check,
 		CLEANUP => 1);
 }
 
@@ -144,6 +167,19 @@ sub run_log
 {
 	print("# Running: " . join(" ", @{ $_[0] }) . "\n");
 	return IPC::Run::run(@_);
+}
+
+# Generate a string made of the given range of ASCII characters
+sub generate_ascii_string
+{
+	my ($from_char, $to_char) = @_;
+	my $res;
+
+	for my $i ($from_char .. $to_char)
+	{
+		$res .= sprintf("%c", $i);
+	}
+	return $res;
 }
 
 sub slurp_dir
@@ -257,9 +293,19 @@ sub command_like
 	my ($stdout, $stderr);
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
 	my $result = IPC::Run::run $cmd, '>', \$stdout, '2>', \$stderr;
-	ok($result, "@$cmd exit code 0");
-	is($stderr, '', "@$cmd no stderr");
+	ok($result, "$test_name: exit code 0");
+	is($stderr, '', "$test_name: no stderr");
 	like($stdout, $expected_stdout, "$test_name: matches");
+}
+
+sub command_fails_like
+{
+	my ($cmd, $expected_stderr, $test_name) = @_;
+	my ($stdout, $stderr);
+	print("# Running: " . join(" ", @{$cmd}) . "\n");
+	my $result = IPC::Run::run $cmd, '>', \$stdout, '2>', \$stderr;
+	ok(!$result, "$test_name: exit code not 0");
+	like($stderr, $expected_stderr, "$test_name: matches");
 }
 
 1;

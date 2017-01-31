@@ -3,7 +3,7 @@
  * spi.h
  *				Server Programming Interface public declarations
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/executor/spi.h
@@ -21,8 +21,8 @@
 typedef struct SPITupleTable
 {
 	MemoryContext tuptabcxt;	/* memory context of result table */
-	uint32		alloced;		/* # of alloced vals */
-	uint32		free;			/* # of free vals */
+	uint64		alloced;		/* # of alloced vals */
+	uint64		free;			/* # of free vals */
 	TupleDesc	tupdesc;		/* tuple descriptor */
 	HeapTuple  *vals;			/* tuples */
 	slist_node	next;			/* link for internal bookkeeping */
@@ -59,18 +59,20 @@ typedef struct _SPI_plan *SPIPlanPtr;
 #define SPI_OK_UPDATE_RETURNING 13
 #define SPI_OK_REWRITTEN		14
 
-extern PGDLLIMPORT uint32 SPI_processed;
+/* These used to be functions, now just no-ops for backwards compatibility */
+#define SPI_push()	((void) 0)
+#define SPI_pop()	((void) 0)
+#define SPI_push_conditional()	false
+#define SPI_pop_conditional(pushed) ((void) 0)
+#define SPI_restore_connection()	((void) 0)
+
+extern PGDLLIMPORT uint64 SPI_processed;
 extern PGDLLIMPORT Oid SPI_lastoid;
 extern PGDLLIMPORT SPITupleTable *SPI_tuptable;
 extern PGDLLIMPORT int SPI_result;
 
 extern int	SPI_connect(void);
 extern int	SPI_finish(void);
-extern void SPI_push(void);
-extern void SPI_pop(void);
-extern bool SPI_push_conditional(void);
-extern void SPI_pop_conditional(bool pushed);
-extern void SPI_restore_connection(void);
 extern int	SPI_execute(const char *src, bool read_only, long tcount);
 extern int SPI_execute_plan(SPIPlanPtr plan, Datum *Values, const char *Nulls,
 				 bool read_only, long tcount);

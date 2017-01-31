@@ -3,7 +3,7 @@
  * parsexlog.c
  *	  Functions for reading Write-Ahead-Log
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *-------------------------------------------------------------------------
@@ -54,7 +54,7 @@ static int SimpleXLogPageRead(XLogReaderState *xlogreader,
 				   TimeLineID *pageTLI);
 
 /*
- * Read WAL from the datadir/pg_xlog, starting from 'startpoint' on timeline
+ * Read WAL from the datadir/pg_wal, starting from 'startpoint' on timeline
  * index 'tliIndex' in target timeline history, until 'endpoint'. Make note of
  * the data blocks touched by the WAL records, and return them in a page map.
  */
@@ -261,15 +261,15 @@ SimpleXLogPageRead(XLogReaderState *xlogreader, XLogRecPtr targetPagePtr,
 
 		/*
 		 * Since incomplete segments are copied into next timelines, switch to
-		 * the timeline holding the required segment. Assuming this scan can be
-		 * done both forward and backward, consider also switching timeline
+		 * the timeline holding the required segment. Assuming this scan can
+		 * be done both forward and backward, consider also switching timeline
 		 * accordingly.
 		 */
 		while (private->tliIndex < targetNentries - 1 &&
-				targetHistory[private->tliIndex].end < targetSegEnd)
+			   targetHistory[private->tliIndex].end < targetSegEnd)
 			private->tliIndex++;
 		while (private->tliIndex > 0 &&
-				targetHistory[private->tliIndex].begin >= targetSegEnd)
+			   targetHistory[private->tliIndex].begin >= targetSegEnd)
 			private->tliIndex--;
 
 		XLogFileName(xlogfname, targetHistory[private->tliIndex].tli, xlogreadsegno);

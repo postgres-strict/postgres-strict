@@ -3,7 +3,7 @@
  * pg_dump.h
  *	  Common header file for the pg_dump utility
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/pg_dump/pg_dump.h
@@ -48,6 +48,7 @@ typedef enum
 	DO_FUNC,
 	DO_AGG,
 	DO_OPERATOR,
+	DO_ACCESS_METHOD,
 	DO_OPCLASS,
 	DO_OPFAMILY,
 	DO_COLLATION,
@@ -62,6 +63,7 @@ typedef enum
 	DO_PROCLANG,
 	DO_CAST,
 	DO_TABLE_DATA,
+	DO_SEQUENCE_SET,
 	DO_DUMMY_TYPE,
 	DO_TSPARSER,
 	DO_TSDICT,
@@ -77,8 +79,50 @@ typedef enum
 	DO_POST_DATA_BOUNDARY,
 	DO_EVENT_TRIGGER,
 	DO_REFRESH_MATVIEW,
-	DO_POLICY
+	DO_POLICY,
+	DO_PUBLICATION,
+	DO_PUBLICATION_REL,
+	DO_SUBSCRIPTION
 } DumpableObjectType;
+
+/* component types of an object which can be selected for dumping */
+typedef uint32 DumpComponents;	/* a bitmask of dump object components */
+#define DUMP_COMPONENT_NONE			(0)
+#define DUMP_COMPONENT_DEFINITION	(1 << 0)
+#define DUMP_COMPONENT_DATA			(1 << 1)
+#define DUMP_COMPONENT_COMMENT		(1 << 2)
+#define DUMP_COMPONENT_SECLABEL		(1 << 3)
+#define DUMP_COMPONENT_ACL			(1 << 4)
+#define DUMP_COMPONENT_POLICY		(1 << 5)
+#define DUMP_COMPONENT_USERMAP		(1 << 6)
+#define DUMP_COMPONENT_ALL			(0xFFFF)
+
+/*
+ * component types which require us to obtain a lock on the table
+ *
+ * Note that some components only require looking at the information
+ * in the pg_catalog tables and, for those components, we do not need
+ * to lock the table.  Be careful here though- some components use
+ * server-side functions which pull the latest information from
+ * SysCache and in those cases we *do* need to lock the table.
+ *
+ * We do not need locks for the COMMENT and SECLABEL components as
+ * those simply query their associated tables without using any
+ * server-side functions.  We do not need locks for the ACL component
+ * as we pull that information from pg_class without using any
+ * server-side functions that use SysCache.  The USERMAP component
+ * is only relevant for FOREIGN SERVERs and not tables, so no sense
+ * locking a table for that either (that can happen if we are going
+ * to dump "ALL" components for a table).
+ *
+ * We DO need locks for DEFINITION, due to various server-side
+ * functions that are used and POLICY due to pg_get_expr().  We set
+ * this up to grab the lock except in the cases we know to be safe.
+ */
+#define DUMP_COMPONENTS_REQUIRING_LOCK (\
+		DUMP_COMPONENT_DEFINITION |\
+		DUMP_COMPONENT_DATA |\
+		DUMP_COMPONENT_POLICY)
 
 typedef struct _dumpableObject
 {
@@ -87,7 +131,8 @@ typedef struct _dumpableObject
 	DumpId		dumpId;			/* assigned by AssignDumpId() */
 	char	   *name;			/* object name (should never be NULL) */
 	struct _namespaceInfo *namespace;	/* containing namespace, or NULL */
-	bool		dump;			/* true if we want to dump this object */
+	DumpComponents dump;		/* bitmask of components to dump */
+	DumpComponents dump_contains;		/* as above, but for contained objects */
 	bool		ext_member;		/* true if object is member of extension */
 	DumpId	   *dependencies;	/* dumpIds of objects this one depends on */
 	int			nDeps;			/* number of valid dependencies */
@@ -99,6 +144,9 @@ typedef struct _namespaceInfo
 	DumpableObject dobj;
 	char	   *rolname;		/* name of owner, or empty string */
 	char	   *nspacl;
+	char	   *rnspacl;
+	char	   *initnspacl;
+	char	   *initrnspacl;
 } NamespaceInfo;
 
 typedef struct _extensionInfo
@@ -121,6 +169,9 @@ typedef struct _typeInfo
 	 */
 	char	   *rolname;		/* name of owner, or empty string */
 	char	   *typacl;
+	char	   *rtypacl;
+	char	   *inittypacl;
+	char	   *initrtypacl;
 	Oid			typelem;
 	Oid			typrelid;
 	char		typrelkind;		/* 'r', 'v', 'c', etc */
@@ -150,6 +201,9 @@ typedef struct _funcInfo
 	Oid		   *argtypes;
 	Oid			prorettype;
 	char	   *proacl;
+	char	   *rproacl;
+	char	   *initproacl;
+	char	   *initrproacl;
 } FuncInfo;
 
 /* AggInfo is a superset of FuncInfo */
@@ -166,6 +220,13 @@ typedef struct _oprInfo
 	char		oprkind;
 	Oid			oprcode;
 } OprInfo;
+
+typedef struct _accessMethodInfo
+{
+	DumpableObject dobj;
+	char		amtype;
+	char	   *amhandler;
+} AccessMethodInfo;
 
 typedef struct _opclassInfo
 {
@@ -199,6 +260,9 @@ typedef struct _tableInfo
 	DumpableObject dobj;
 	char	   *rolname;		/* name of owner, or empty string */
 	char	   *relacl;
+	char	   *rrelacl;
+	char	   *initrelacl;
+	char	   *initrrelacl;
 	char		relkind;
 	char		relpersistence; /* relation persistence */
 	bool		relispopulated; /* relation is populated */
@@ -226,6 +290,7 @@ typedef struct _tableInfo
 	int			relpages;		/* table's size in pages (from pg_class) */
 
 	bool		interesting;	/* true if need to collect more data */
+	bool		dummy_view;		/* view's real definition must be postponed */
 	bool		postponed_def;	/* matview must be postponed into post-data */
 
 	/*
@@ -250,6 +315,7 @@ typedef struct _tableInfo
 	bool	   *inhNotNull;		/* true if NOT NULL is inherited */
 	struct _attrDefInfo **attrdefs;		/* DEFAULT expressions */
 	struct _constraintInfo *checkexprs; /* CHECK constraints */
+	char	   *partkeydef;		/* partition key definition */
 
 	/*
 	 * Stuff computed only for dumpable tables.
@@ -259,6 +325,8 @@ typedef struct _tableInfo
 	struct _tableDataInfo *dataObj;		/* TableDataInfo, if dumping its data */
 	int			numTriggers;	/* number of triggers for table */
 	struct _triggerInfo *triggers;		/* array of TriggerInfo structs */
+	struct _tableInfo *partitionOf;	/* TableInfo for the partition parent */
+	char	   *partitiondef;		/* partition key definition */
 } TableInfo;
 
 typedef struct _attrDefInfo
@@ -303,8 +371,6 @@ typedef struct _ruleInfo
 	char		ev_enabled;
 	bool		separate;		/* TRUE if must dump as separate item */
 	/* separate is always true for non-ON SELECT rules */
-	char	   *reloptions;		/* options specified by WITH (...) */
-	/* reloptions is only set if we need to dump the options with the rule */
 } RuleInfo;
 
 typedef struct _triggerInfo
@@ -367,6 +433,9 @@ typedef struct _procLangInfo
 	Oid			laninline;
 	Oid			lanvalidator;
 	char	   *lanacl;
+	char	   *rlanacl;
+	char	   *initlanacl;
+	char	   *initrlanacl;
 	char	   *lanowner;		/* name of owner, or empty string */
 } ProcLangInfo;
 
@@ -395,6 +464,15 @@ typedef struct _inhInfo
 	Oid			inhrelid;		/* OID of a child table */
 	Oid			inhparent;		/* OID of its parent */
 } InhInfo;
+
+/* PartInfo isn't a DumpableObject, just temporary state */
+typedef struct _partInfo
+{
+	Oid			partrelid;		/* OID of a partition */
+	Oid			partparent;		/* OID of its parent */
+	char	   *partdef;		/* partition bound definition */
+} PartInfo;
+
 
 typedef struct _prsInfo
 {
@@ -436,6 +514,9 @@ typedef struct _fdwInfo
 	char	   *fdwvalidator;
 	char	   *fdwoptions;
 	char	   *fdwacl;
+	char	   *rfdwacl;
+	char	   *initfdwacl;
+	char	   *initrfdwacl;
 } FdwInfo;
 
 typedef struct _foreignServerInfo
@@ -446,6 +527,9 @@ typedef struct _foreignServerInfo
 	char	   *srvtype;
 	char	   *srvversion;
 	char	   *srvacl;
+	char	   *rsrvacl;
+	char	   *initsrvacl;
+	char	   *initrsrvacl;
 	char	   *srvoptions;
 } ForeignServerInfo;
 
@@ -462,6 +546,9 @@ typedef struct _blobInfo
 	DumpableObject dobj;
 	char	   *rolname;
 	char	   *blobacl;
+	char	   *rblobacl;
+	char	   *initblobacl;
+	char	   *initrblobacl;
 } BlobInfo;
 
 /*
@@ -475,11 +562,49 @@ typedef struct _policyInfo
 	DumpableObject dobj;
 	TableInfo  *poltable;
 	char	   *polname;		/* null indicates RLS is enabled on rel */
-	char	   *polcmd;
+	char		polcmd;
+	bool		polpermissive;
 	char	   *polroles;
 	char	   *polqual;
 	char	   *polwithcheck;
 } PolicyInfo;
+
+/*
+ * The PublicationInfo struct is used to represent publications.
+ */
+typedef struct _PublicationInfo
+{
+	DumpableObject dobj;
+	char	   *rolname;
+	bool		puballtables;
+	bool		pubinsert;
+	bool		pubupdate;
+	bool		pubdelete;
+} PublicationInfo;
+
+/*
+ * The PublicationRelInfo struct is used to represent publication table
+ * mapping.
+ */
+typedef struct _PublicationRelInfo
+{
+	DumpableObject dobj;
+	TableInfo  *pubtable;
+	char	   *pubname;
+} PublicationRelInfo;
+
+/*
+ * The SubscriptionInfo struct is used to represent subscription.
+ */
+typedef struct _SubscriptionInfo
+{
+	DumpableObject dobj;
+	char	   *rolname;
+	bool		subenabled;
+	char	   *subconninfo;
+	char	   *subslotname;
+	char	   *subpublications;
+} SubscriptionInfo;
 
 /*
  * We build an array of these with an entry for each object that is an
@@ -528,15 +653,11 @@ extern ExtensionInfo *findExtensionByOid(Oid oid);
 extern void setExtensionMembership(ExtensionMemberId *extmems, int nextmems);
 extern ExtensionInfo *findOwningExtension(CatalogId catalogId);
 
-extern void simple_oid_list_append(SimpleOidList *list, Oid val);
-extern bool simple_oid_list_member(SimpleOidList *list, Oid val);
-
 extern void parseOidArray(const char *str, Oid *array, int arraysize);
 
 extern void sortDumpableObjects(DumpableObject **objs, int numObjs,
 					DumpId preBoundaryId, DumpId postBoundaryId);
 extern void sortDumpableObjectsByTypeName(DumpableObject **objs, int numObjs);
-extern void sortDumpableObjectsByTypeOid(DumpableObject **objs, int numObjs);
 extern void sortDataAndIndexObjectsBySize(DumpableObject **objs, int numObjs);
 
 /*
@@ -548,6 +669,7 @@ extern TypeInfo *getTypes(Archive *fout, int *numTypes);
 extern FuncInfo *getFuncs(Archive *fout, int *numFuncs);
 extern AggInfo *getAggregates(Archive *fout, int *numAggregates);
 extern OprInfo *getOperators(Archive *fout, int *numOperators);
+extern AccessMethodInfo *getAccessMethods(Archive *fout, int *numAccessMethods);
 extern OpclassInfo *getOpclasses(Archive *fout, int *numOpclasses);
 extern OpfamilyInfo *getOpfamilies(Archive *fout, int *numOpfamilies);
 extern CollInfo *getCollations(Archive *fout, int *numCollations);
@@ -555,6 +677,7 @@ extern ConvInfo *getConversions(Archive *fout, int *numConversions);
 extern TableInfo *getTables(Archive *fout, int *numTables);
 extern void getOwnedSeqs(Archive *fout, TableInfo tblinfo[], int numTables);
 extern InhInfo *getInherits(Archive *fout, int *numInherits);
+extern PartInfo *getPartitions(Archive *fout, int *numPartitions);
 extern void getIndexes(Archive *fout, TableInfo tblinfo[], int numTables);
 extern void getConstraints(Archive *fout, TableInfo tblinfo[], int numTables);
 extern RuleInfo *getRules(Archive *fout, int *numRules);
@@ -579,5 +702,10 @@ extern void processExtensionTables(Archive *fout, ExtensionInfo extinfo[],
 					   int numExtensions);
 extern EventTriggerInfo *getEventTriggers(Archive *fout, int *numEventTriggers);
 extern void getPolicies(Archive *fout, TableInfo tblinfo[], int numTables);
+extern void getTablePartitionKeyInfo(Archive *fout, TableInfo *tblinfo, int numTables);
+extern void getPublications(Archive *fout);
+extern void getPublicationTables(Archive *fout, TableInfo tblinfo[],
+								 int numTables);
+extern void getSubscriptions(Archive *fout);
 
 #endif   /* PG_DUMP_H */

@@ -3,7 +3,7 @@
  * amapi.h
  *	  API for Postgres index access methods.
  *
- * Copyright (c) 2015-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2015-2017, PostgreSQL Global Development Group
  *
  * src/include/access/amapi.h
  *
@@ -24,6 +24,34 @@ struct IndexPath;
 
 /* Likewise, this file shouldn't depend on execnodes.h. */
 struct IndexInfo;
+
+
+/*
+ * Properties for amproperty API.  This list covers properties known to the
+ * core code, but an index AM can define its own properties, by matching the
+ * string property name.
+ */
+typedef enum IndexAMProperty
+{
+	AMPROP_UNKNOWN = 0,			/* anything not known to core code */
+	AMPROP_ASC,					/* column properties */
+	AMPROP_DESC,
+	AMPROP_NULLS_FIRST,
+	AMPROP_NULLS_LAST,
+	AMPROP_ORDERABLE,
+	AMPROP_DISTANCE_ORDERABLE,
+	AMPROP_RETURNABLE,
+	AMPROP_SEARCH_ARRAY,
+	AMPROP_SEARCH_NULLS,
+	AMPROP_CLUSTERABLE,			/* index properties */
+	AMPROP_INDEX_SCAN,
+	AMPROP_BITMAP_SCAN,
+	AMPROP_BACKWARD_SCAN,
+	AMPROP_CAN_ORDER,			/* AM properties */
+	AMPROP_CAN_UNIQUE,
+	AMPROP_CAN_MULTI_COL,
+	AMPROP_CAN_EXCLUDE
+} IndexAMProperty;
 
 
 /*
@@ -72,6 +100,11 @@ typedef void (*amcostestimate_function) (struct PlannerInfo *root,
 typedef bytea *(*amoptions_function) (Datum reloptions,
 												  bool validate);
 
+/* report AM, index, or index column property */
+typedef bool (*amproperty_function) (Oid index_oid, int attno,
+								  IndexAMProperty prop, const char *propname,
+												 bool *res, bool *isnull);
+
 /* validate definition of an opclass for this AM */
 typedef bool (*amvalidate_function) (Oid opclassoid);
 
@@ -104,6 +137,18 @@ typedef void (*ammarkpos_function) (IndexScanDesc scan);
 /* restore marked scan position */
 typedef void (*amrestrpos_function) (IndexScanDesc scan);
 
+/*
+ * Callback function signatures - for parallel index scans.
+ */
+
+/* estimate size of parallel scan descriptor */
+typedef Size (*amestimateparallelscan_function) (void);
+
+/* prepare for parallel index scan */
+typedef void (*aminitparallelscan_function) (void *target);
+
+/* (re)start parallel index scan */
+typedef void (*amparallelrescan_function) (IndexScanDesc scan);
 
 /*
  * API struct for an index AM.  Note this must be stored in a single palloc'd
@@ -154,6 +199,7 @@ typedef struct IndexAmRoutine
 	amcanreturn_function amcanreturn;	/* can be NULL */
 	amcostestimate_function amcostestimate;
 	amoptions_function amoptions;
+	amproperty_function amproperty;		/* can be NULL */
 	amvalidate_function amvalidate;
 	ambeginscan_function ambeginscan;
 	amrescan_function amrescan;
@@ -162,13 +208,16 @@ typedef struct IndexAmRoutine
 	amendscan_function amendscan;
 	ammarkpos_function ammarkpos;		/* can be NULL */
 	amrestrpos_function amrestrpos;		/* can be NULL */
+
+	/* interface functions to support parallel index scans */
+	amestimateparallelscan_function amestimateparallelscan;		/* can be NULL */
+	aminitparallelscan_function aminitparallelscan;		/* can be NULL */
+	amparallelrescan_function amparallelrescan; /* can be NULL */
 } IndexAmRoutine;
 
 
 /* Functions in access/index/amapi.c */
 extern IndexAmRoutine *GetIndexAmRoutine(Oid amhandler);
-extern IndexAmRoutine *GetIndexAmRoutineByAmId(Oid amoid);
-
-extern Datum amvalidate(PG_FUNCTION_ARGS);
+extern IndexAmRoutine *GetIndexAmRoutineByAmId(Oid amoid, bool noerror);
 
 #endif   /* AMAPI_H */

@@ -4,7 +4,7 @@
  *	  routines to manage scans of inverted index relations
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -38,14 +38,10 @@ ginbeginscan(Relation rel, int nkeys, int norderbys)
 	so->nkeys = 0;
 	so->tempCtx = AllocSetContextCreate(CurrentMemoryContext,
 										"Gin scan temporary context",
-										ALLOCSET_DEFAULT_MINSIZE,
-										ALLOCSET_DEFAULT_INITSIZE,
-										ALLOCSET_DEFAULT_MAXSIZE);
+										ALLOCSET_DEFAULT_SIZES);
 	so->keyCtx = AllocSetContextCreate(CurrentMemoryContext,
 									   "Gin scan key context",
-									   ALLOCSET_DEFAULT_MINSIZE,
-									   ALLOCSET_DEFAULT_INITSIZE,
-									   ALLOCSET_DEFAULT_MAXSIZE);
+									   ALLOCSET_DEFAULT_SIZES);
 	initGinState(&so->ginstate, scan->indexRelation);
 
 	scan->opaque = so;
@@ -246,6 +242,8 @@ ginFreeScanKeys(GinScanOpaque so)
 
 		if (entry->buffer != InvalidBuffer)
 			ReleaseBuffer(entry->buffer);
+		if (entry->list)
+			pfree(entry->list);
 		if (entry->matchIterator)
 			tbm_end_iterate(entry->matchIterator);
 		if (entry->matchBitmap)
@@ -285,7 +283,7 @@ ginNewScanKey(IndexScanDesc scan)
 	so->totalentries = 0;
 	so->allocentries = 32;
 	so->entries = (GinScanEntry *)
-		palloc0(so->allocentries * sizeof(GinScanEntry));
+		palloc(so->allocentries * sizeof(GinScanEntry));
 
 	so->isVoidRes = false;
 

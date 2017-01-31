@@ -4,7 +4,7 @@
  *
  *	  Routines for aggregate-manipulation commands
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -22,7 +22,6 @@
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "access/htup_details.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
@@ -52,8 +51,7 @@
  * "parameters" is a list of DefElem representing the agg's definition clauses.
  */
 ObjectAddress
-DefineAggregate(List *name, List *args, bool oldstyle, List *parameters,
-				const char *queryString)
+DefineAggregate(ParseState *pstate, List *name, List *args, bool oldstyle, List *parameters)
 {
 	char	   *aggName;
 	Oid			aggNamespace;
@@ -62,6 +60,8 @@ DefineAggregate(List *name, List *args, bool oldstyle, List *parameters,
 	List	   *transfuncName = NIL;
 	List	   *finalfuncName = NIL;
 	List	   *combinefuncName = NIL;
+	List	   *serialfuncName = NIL;
+	List	   *deserialfuncName = NIL;
 	List	   *mtransfuncName = NIL;
 	List	   *minvtransfuncName = NIL;
 	List	   *mfinalfuncName = NIL;
@@ -75,6 +75,7 @@ DefineAggregate(List *name, List *args, bool oldstyle, List *parameters,
 	int32		mtransSpace = 0;
 	char	   *initval = NULL;
 	char	   *minitval = NULL;
+	char	   *parallel = NULL;
 	int			numArgs;
 	int			numDirectArgs = 0;
 	oidvector  *parameterTypes;
@@ -87,6 +88,7 @@ DefineAggregate(List *name, List *args, bool oldstyle, List *parameters,
 	Oid			mtransTypeId = InvalidOid;
 	char		transTypeType;
 	char		mtransTypeType = 0;
+	char		proparallel = PROPARALLEL_UNSAFE;
 	ListCell   *pl;
 
 	/* Convert list of names to a name and namespace */
@@ -107,13 +109,13 @@ DefineAggregate(List *name, List *args, bool oldstyle, List *parameters,
 			aggKind = AGGKIND_ORDERED_SET;
 		else
 			numDirectArgs = 0;
-		args = (List *) linitial(args);
+		args = castNode(List, linitial(args));
 	}
 
 	/* Examine aggregate's definition clauses */
 	foreach(pl, parameters)
 	{
-		DefElem    *defel = (DefElem *) lfirst(pl);
+		DefElem    *defel = castNode(DefElem, lfirst(pl));
 
 		/*
 		 * sfunc1, stype1, and initcond1 are accepted as obsolete spellings
@@ -127,6 +129,10 @@ DefineAggregate(List *name, List *args, bool oldstyle, List *parameters,
 			finalfuncName = defGetQualifiedName(defel);
 		else if (pg_strcasecmp(defel->defname, "combinefunc") == 0)
 			combinefuncName = defGetQualifiedName(defel);
+		else if (pg_strcasecmp(defel->defname, "serialfunc") == 0)
+			serialfuncName = defGetQualifiedName(defel);
+		else if (pg_strcasecmp(defel->defname, "deserialfunc") == 0)
+			deserialfuncName = defGetQualifiedName(defel);
 		else if (pg_strcasecmp(defel->defname, "msfunc") == 0)
 			mtransfuncName = defGetQualifiedName(defel);
 		else if (pg_strcasecmp(defel->defname, "minvfunc") == 0)
@@ -168,6 +174,8 @@ DefineAggregate(List *name, List *args, bool oldstyle, List *parameters,
 			initval = defGetString(defel);
 		else if (pg_strcasecmp(defel->defname, "minitcond") == 0)
 			minitval = defGetString(defel);
+		else if (pg_strcasecmp(defel->defname, "parallel") == 0)
+			parallel = defGetString(defel);
 		else
 			ereport(WARNING,
 					(errcode(ERRCODE_SYNTAX_ERROR),
@@ -277,10 +285,10 @@ DefineAggregate(List *name, List *args, bool oldstyle, List *parameters,
 					 errmsg("basetype is redundant with aggregate input type specification")));
 
 		numArgs = list_length(args);
-		interpret_function_parameter_list(args,
+		interpret_function_parameter_list(pstate,
+										  args,
 										  InvalidOid,
 										  true, /* is an aggregate */
-										  queryString,
 										  &parameterTypes,
 										  &allParameterTypes,
 										  &parameterModes,
@@ -317,6 +325,27 @@ DefineAggregate(List *name, List *args, bool oldstyle, List *parameters,
 					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
 					 errmsg("aggregate transition data type cannot be %s",
 							format_type_be(transTypeId))));
+	}
+
+	if (serialfuncName && deserialfuncName)
+	{
+		/*
+		 * Serialization is only needed/allowed for transtype INTERNAL.
+		 */
+		if (transTypeId != INTERNALOID)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+					 errmsg("serialization functions may be specified only when the aggregate transition data type is %s",
+							format_type_be(INTERNALOID))));
+	}
+	else if (serialfuncName || deserialfuncName)
+	{
+		/*
+		 * Cannot specify one function without the other.
+		 */
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+				 errmsg("must specify both or neither of serialization and deserialization functions")));
 	}
 
 	/*
@@ -370,6 +399,20 @@ DefineAggregate(List *name, List *args, bool oldstyle, List *parameters,
 		(void) OidInputFunctionCall(typinput, minitval, typioparam, -1);
 	}
 
+	if (parallel)
+	{
+		if (pg_strcasecmp(parallel, "safe") == 0)
+			proparallel = PROPARALLEL_SAFE;
+		else if (pg_strcasecmp(parallel, "restricted") == 0)
+			proparallel = PROPARALLEL_RESTRICTED;
+		else if (pg_strcasecmp(parallel, "unsafe") == 0)
+			proparallel = PROPARALLEL_UNSAFE;
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("parameter \"parallel\" must be SAFE, RESTRICTED, or UNSAFE")));
+	}
+
 	/*
 	 * Most of the argument-checking is done inside of AggregateCreate
 	 */
@@ -387,6 +430,8 @@ DefineAggregate(List *name, List *args, bool oldstyle, List *parameters,
 						   transfuncName,		/* step function name */
 						   finalfuncName,		/* final function name */
 						   combinefuncName,		/* combine function name */
+						   serialfuncName,		/* serial function name */
+						   deserialfuncName,	/* deserial function name */
 						   mtransfuncName,		/* fwd trans function name */
 						   minvtransfuncName,	/* inv trans function name */
 						   mfinalfuncName,		/* final function name */
@@ -398,5 +443,6 @@ DefineAggregate(List *name, List *args, bool oldstyle, List *parameters,
 						   mtransTypeId,		/* transition data type */
 						   mtransSpace, /* transition space */
 						   initval,		/* initial condition */
-						   minitval);	/* initial condition */
+						   minitval,	/* initial condition */
+						   proparallel);		/* parallel safe? */
 }

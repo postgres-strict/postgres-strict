@@ -3,7 +3,7 @@
  * rewriteDefine.c
  *	  routines for defining a rewrite rule
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -173,7 +173,7 @@ InsertRule(char *rulname,
 	if (event_qual != NULL)
 	{
 		/* Find query containing OLD/NEW rtable entries */
-		Query	   *qry = (Query *) linitial(action);
+		Query	   *qry = castNode(Query, linitial(action));
 
 		qry = getInsertSelectQuery(qry, NULL);
 		recordDependencyOnExpr(&myself, event_qual, qry->rtable,
@@ -261,7 +261,8 @@ DefineQueryRewrite(char *rulename,
 	 */
 	if (event_relation->rd_rel->relkind != RELKIND_RELATION &&
 		event_relation->rd_rel->relkind != RELKIND_MATVIEW &&
-		event_relation->rd_rel->relkind != RELKIND_VIEW)
+		event_relation->rd_rel->relkind != RELKIND_VIEW &&
+		event_relation->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a table or view",
@@ -285,7 +286,7 @@ DefineQueryRewrite(char *rulename,
 	 */
 	foreach(l, action)
 	{
-		query = (Query *) lfirst(l);
+		query = castNode(Query, lfirst(l));
 		if (query->resultRelation == 0)
 			continue;
 		/* Don't be fooled by INSERT/SELECT */
@@ -327,10 +328,9 @@ DefineQueryRewrite(char *rulename,
 		/*
 		 * ... the one action must be a SELECT, ...
 		 */
-		query = (Query *) linitial(action);
+		query = castNode(Query, linitial(action));
 		if (!is_instead ||
-			query->commandType != CMD_SELECT ||
-			query->utilityStmt != NULL)
+			query->commandType != CMD_SELECT)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("rules on SELECT must have action INSTEAD SELECT")));
@@ -414,8 +414,8 @@ DefineQueryRewrite(char *rulename,
 		 * any triggers, indexes, child tables, policies, or RLS enabled.
 		 * (Note: these tests are too strict, because they will reject
 		 * relations that once had such but don't anymore.  But we don't
-		 * really care, because this whole business of converting relations
-		 * to views is just a kluge to allow dump/reload of views that
+		 * really care, because this whole business of converting relations to
+		 * views is just a kluge to allow dump/reload of views that
 		 * participate in circular dependencies.)
 		 */
 		if (event_relation->rd_rel->relkind != RELKIND_VIEW &&
@@ -482,7 +482,7 @@ DefineQueryRewrite(char *rulename,
 
 		foreach(l, action)
 		{
-			query = (Query *) lfirst(l);
+			query = castNode(Query, lfirst(l));
 
 			if (!query->returningList)
 				continue;
@@ -671,17 +671,29 @@ checkRuleResultList(List *targetList, TupleDesc resultDesc, bool isSelect,
 		attname = NameStr(attr->attname);
 
 		/*
-		 * Disallow dropped columns in the relation.  This won't happen in the
-		 * cases we actually care about (namely creating a view via CREATE
-		 * TABLE then CREATE RULE, or adding a RETURNING rule to a view).
-		 * Trying to cope with it is much more trouble than it's worth,
-		 * because we'd have to modify the rule to insert dummy NULLs at the
-		 * right positions.
+		 * Disallow dropped columns in the relation.  This is not really
+		 * expected to happen when creating an ON SELECT rule.  It'd be
+		 * possible if someone tried to convert a relation with dropped
+		 * columns to a view, but the only case we care about supporting
+		 * table-to-view conversion for is pg_dump, and pg_dump won't do that.
+		 *
+		 * Unfortunately, the situation is also possible when adding a rule
+		 * with RETURNING to a regular table, and rejecting that case is
+		 * altogether more annoying.  In principle we could support it by
+		 * modifying the targetlist to include dummy NULL columns
+		 * corresponding to the dropped columns in the tupdesc.  However,
+		 * places like ruleutils.c would have to be fixed to not process such
+		 * entries, and that would take an uncertain and possibly rather large
+		 * amount of work.  (Note we could not dodge that by marking the dummy
+		 * columns resjunk, since it's precisely the non-resjunk tlist columns
+		 * that are expected to correspond to table columns.)
 		 */
 		if (attr->attisdropped)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("cannot convert relation containing dropped columns to view")));
+					 isSelect ?
+					 errmsg("cannot convert relation containing dropped columns to view") :
+					 errmsg("cannot create a RETURNING list for a relation containing dropped columns")));
 
 		/* Check name match if required; no need for two error texts here */
 		if (requireColumnNameMatch && strcmp(tle->resname, attname) != 0)
@@ -801,7 +813,7 @@ setRuleCheckAsUser_Query(Query *qry, Oid userid)
 	{
 		CommonTableExpr *cte = (CommonTableExpr *) lfirst(l);
 
-		setRuleCheckAsUser_Query((Query *) cte->ctequery, userid);
+		setRuleCheckAsUser_Query(castNode(Query, cte->ctequery), userid);
 	}
 
 	/* If there are sublinks, search for them and process their RTEs */

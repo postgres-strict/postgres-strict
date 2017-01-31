@@ -7,7 +7,7 @@
  * we need two sets of code.  Ought to look at trying to unify the cases.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -56,15 +56,7 @@ SubqueryNext(SubqueryScanState *node)
 	 * We just return the subplan's result slot, rather than expending extra
 	 * cycles for ExecCopySlot().  (Our own ScanTupleSlot is used only for
 	 * EvalPlanQual rechecks.)
-	 *
-	 * We do need to mark the slot contents read-only to prevent interference
-	 * between different functions reading the same datum from the slot. It's
-	 * a bit hokey to do this to the subplan's slot, but should be safe
-	 * enough.
 	 */
-	if (!TupIsNull(slot))
-		slot = ExecMakeSlotContentsReadOnly(slot);
-
 	return slot;
 }
 
@@ -145,8 +137,6 @@ ExecInitSubqueryScan(SubqueryScan *node, EState *estate, int eflags)
 	 * initialize subquery
 	 */
 	subquerystate->subplan = ExecInitNode(node->subplan, estate, eflags);
-
-	subquerystate->ss.ps.ps_TupFromTlist = false;
 
 	/*
 	 * Initialize scan tuple type (needed by ExecAssignScanProjectionInfo)

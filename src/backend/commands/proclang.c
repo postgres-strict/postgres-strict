@@ -3,7 +3,7 @@
  * proclang.c
  *	  PostgreSQL PROCEDURAL LANGUAGE support code.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -114,8 +114,8 @@ CreateProceduralLanguage(CreatePLangStmt *stmt)
 			if (funcrettype != LANGUAGE_HANDLEROID)
 				ereport(ERROR,
 						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				  errmsg("function %s must return type \"language_handler\"",
-						 NameListToString(funcname))));
+						 errmsg("function %s must return type %s",
+						   NameListToString(funcname), "language_handler")));
 		}
 		else
 		{
@@ -278,15 +278,16 @@ CreateProceduralLanguage(CreatePLangStmt *stmt)
 			{
 				ereport(WARNING,
 						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-						 errmsg("changing return type of function %s from \"opaque\" to \"language_handler\"",
-								NameListToString(stmt->plhandler))));
+				  errmsg("changing return type of function %s from %s to %s",
+						 NameListToString(stmt->plhandler),
+						 "opaque", "language_handler")));
 				SetFunctionReturnType(handlerOid, LANGUAGE_HANDLEROID);
 			}
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				  errmsg("function %s must return type \"language_handler\"",
-						 NameListToString(stmt->plhandler))));
+						 errmsg("function %s must return type %s",
+					NameListToString(stmt->plhandler), "language_handler")));
 		}
 
 		/* validate the inline function */
@@ -463,7 +464,7 @@ find_language_template(const char *languageName)
 	ScanKeyInit(&key,
 				Anum_pg_pltemplate_tmplname,
 				BTEqualStrategyNumber, F_NAMEEQ,
-				NameGetDatum(languageName));
+				CStringGetDatum(languageName));
 	scan = systable_beginscan(rel, PLTemplateNameIndexId, true,
 							  NULL, 1, &key);
 

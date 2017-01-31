@@ -3,7 +3,7 @@
  * uuid.c
  *	  Functions for the built-in type "uuid".
  *
- * Copyright (c) 2007-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2007-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/adt/uuid.c
@@ -22,15 +22,6 @@
 #include "utils/sortsupport.h"
 #include "utils/uuid.h"
 
-/* uuid size in bytes */
-#define UUID_LEN 16
-
-/* pg_uuid_t is declared to be struct pg_uuid_t in uuid.h */
-struct pg_uuid_t
-{
-	unsigned char data[UUID_LEN];
-};
-
 /* sortsupport for uuid */
 typedef struct
 {
@@ -44,8 +35,8 @@ static void string_to_uuid(const char *source, pg_uuid_t *uuid);
 static int	uuid_internal_cmp(const pg_uuid_t *arg1, const pg_uuid_t *arg2);
 static int	uuid_fast_cmp(Datum x, Datum y, SortSupport ssup);
 static int	uuid_cmp_abbrev(Datum x, Datum y, SortSupport ssup);
-static bool	uuid_abbrev_abort(int memtupcount, SortSupport ssup);
-static Datum	uuid_abbrev_convert(Datum original, SortSupport ssup);
+static bool uuid_abbrev_abort(int memtupcount, SortSupport ssup);
+static Datum uuid_abbrev_convert(Datum original, SortSupport ssup);
 
 Datum
 uuid_in(PG_FUNCTION_ARGS)
@@ -142,8 +133,8 @@ string_to_uuid(const char *source, pg_uuid_t *uuid)
 syntax_error:
 	ereport(ERROR,
 			(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-			 errmsg("invalid input syntax for uuid: \"%s\"",
-					source)));
+			 errmsg("invalid input syntax for type %s: \"%s\"",
+					"uuid", source)));
 }
 
 Datum
@@ -245,15 +236,15 @@ uuid_cmp(PG_FUNCTION_ARGS)
 Datum
 uuid_sortsupport(PG_FUNCTION_ARGS)
 {
-	SortSupport	ssup = (SortSupport) PG_GETARG_POINTER(0);
+	SortSupport ssup = (SortSupport) PG_GETARG_POINTER(0);
 
 	ssup->comparator = uuid_fast_cmp;
 	ssup->ssup_extra = NULL;
 
 	if (ssup->abbreviate)
 	{
-		uuid_sortsupport_state	   *uss;
-		MemoryContext				oldcontext;
+		uuid_sortsupport_state *uss;
+		MemoryContext oldcontext;
 
 		oldcontext = MemoryContextSwitchTo(ssup->ssup_cxt);
 
@@ -310,8 +301,8 @@ uuid_cmp_abbrev(Datum x, Datum y, SortSupport ssup)
 static bool
 uuid_abbrev_abort(int memtupcount, SortSupport ssup)
 {
-	uuid_sortsupport_state	   *uss = ssup->ssup_extra;
-	double						abbr_card;
+	uuid_sortsupport_state *uss = ssup->ssup_extra;
+	double		abbr_card;
 
 	if (memtupcount < 10000 || uss->input_count < 10000 || !uss->estimating)
 		return false;
@@ -340,8 +331,8 @@ uuid_abbrev_abort(int memtupcount, SortSupport ssup)
 	/*
 	 * Target minimum cardinality is 1 per ~2k of non-null inputs.  0.5 row
 	 * fudge factor allows us to abort earlier on genuinely pathological data
-	 * where we've had exactly one abbreviated value in the first 2k (non-null)
-	 * rows.
+	 * where we've had exactly one abbreviated value in the first 2k
+	 * (non-null) rows.
 	 */
 	if (abbr_card < uss->input_count / 2000.0 + 0.5)
 	{
@@ -349,7 +340,7 @@ uuid_abbrev_abort(int memtupcount, SortSupport ssup)
 		if (trace_sort)
 			elog(LOG,
 				 "uuid_abbrev: aborting abbreviation at cardinality %f"
-				 " below threshold %f after " INT64_FORMAT " values (%d rows)",
+			   " below threshold %f after " INT64_FORMAT " values (%d rows)",
 				 abbr_card, uss->input_count / 2000.0 + 0.5, uss->input_count,
 				 memtupcount);
 #endif
@@ -376,9 +367,9 @@ uuid_abbrev_abort(int memtupcount, SortSupport ssup)
 static Datum
 uuid_abbrev_convert(Datum original, SortSupport ssup)
 {
-	uuid_sortsupport_state	   *uss = ssup->ssup_extra;
-	pg_uuid_t				   *authoritative = DatumGetUUIDP(original);
-	Datum						res;
+	uuid_sortsupport_state *uss = ssup->ssup_extra;
+	pg_uuid_t  *authoritative = DatumGetUUIDP(original);
+	Datum		res;
 
 	memcpy(&res, authoritative->data, sizeof(Datum));
 	uss->input_count += 1;
@@ -400,9 +391,9 @@ uuid_abbrev_convert(Datum original, SortSupport ssup)
 	 * Byteswap on little-endian machines.
 	 *
 	 * This is needed so that uuid_cmp_abbrev() (an unsigned integer 3-way
-	 * comparator) works correctly on all platforms.  If we didn't do this, the
-	 * comparator would have to call memcmp() with a pair of pointers to the
-	 * first byte of each abbreviated key, which is slower.
+	 * comparator) works correctly on all platforms.  If we didn't do this,
+	 * the comparator would have to call memcmp() with a pair of pointers to
+	 * the first byte of each abbreviated key, which is slower.
 	 */
 	res = DatumBigEndianToNative(res);
 

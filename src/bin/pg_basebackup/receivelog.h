@@ -2,7 +2,7 @@
  *
  * receivelog.h
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/receivelog.h
@@ -13,6 +13,7 @@
 #define RECEIVELOG_H
 
 #include "libpq-fe.h"
+#include "walmethods.h"
 
 #include "access/xlogdefs.h"
 
@@ -22,16 +23,35 @@
  */
 typedef bool (*stream_stop_callback) (XLogRecPtr segendpos, uint32 timeline, bool segment_finished);
 
+/*
+ * Global parameters when receiving xlog stream. For details about the individual fields,
+ * see the function comment for ReceiveXlogStream().
+ */
+typedef struct StreamCtl
+{
+	XLogRecPtr	startpos;		/* Start position for streaming */
+	TimeLineID	timeline;		/* Timeline to stream data from */
+	char	   *sysidentifier;	/* Validate this system identifier and
+								 * timeline */
+	int			standby_message_timeout;		/* Send status messages this
+												 * often */
+	bool		synchronous;	/* Flush immediately WAL data on write */
+	bool		mark_done;		/* Mark segment as done in generated archive */
+	bool		do_sync;		/* Flush to disk to ensure consistent state of
+								 * data */
+
+	stream_stop_callback stream_stop;	/* Stop streaming when returns true */
+
+	WalWriteMethod *walmethod;	/* How to write the WAL */
+	char	   *partial_suffix; /* Suffix appended to partially received files */
+	char	   *replication_slot;		/* Replication slot to use, or NULL */
+	bool		temp_slot;		/* Create temporary replication slot */
+} StreamCtl;
+
+
+
 extern bool CheckServerVersionForStreaming(PGconn *conn);
 extern bool ReceiveXlogStream(PGconn *conn,
-				  XLogRecPtr startpos,
-				  uint32 timeline,
-				  char *sysidentifier,
-				  char *basedir,
-				  stream_stop_callback stream_stop,
-				  int standby_message_timeout,
-				  char *partial_suffix,
-				  bool synchronous,
-				  bool mark_done);
+				  StreamCtl *stream);
 
 #endif   /* RECEIVELOG_H */

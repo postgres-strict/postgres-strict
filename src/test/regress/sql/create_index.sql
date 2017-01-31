@@ -690,6 +690,16 @@ DROP TABLE unlogged_hash_table;
 
 -- CREATE INDEX hash_ovfl_index ON hash_ovfl_heap USING hash (x int4_ops);
 
+-- Test hash index build tuplesorting.  Force hash tuplesort using low
+-- maintenance_work_mem setting and fillfactor:
+SET maintenance_work_mem = '1MB';
+CREATE INDEX hash_tuplesort_idx ON tenk1 USING hash (stringu1 name_ops) WITH (fillfactor = 10);
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM tenk1 WHERE stringu1 = 'TVAAAA';
+SELECT count(*) FROM tenk1 WHERE stringu1 = 'TVAAAA';
+DROP INDEX hash_tuplesort_idx;
+RESET maintenance_work_mem;
+
 
 --
 -- Test functional index
@@ -823,6 +833,25 @@ ALTER TABLE cwi_test DROP CONSTRAINT cwi_uniq_idx,
 DROP INDEX cwi_replaced_pkey;	-- Should fail; a constraint depends on it
 
 DROP TABLE cwi_test;
+
+--
+-- Check handling of indexes on system columns
+--
+CREATE TABLE oid_table (a INT) WITH OIDS;
+
+-- An index on the OID column should be allowed
+CREATE INDEX ON oid_table (oid);
+
+-- Other system columns cannot be indexed
+CREATE INDEX ON oid_table (ctid);
+
+-- nor used in expressions
+CREATE INDEX ON oid_table ((ctid >= '(1000,0)'));
+
+-- nor used in predicates
+CREATE INDEX ON oid_table (a) WHERE ctid >= '(1000,0)';
+
+DROP TABLE oid_table;
 
 --
 -- Tests for IS NULL/IS NOT NULL with b-tree indexes
@@ -972,7 +1001,7 @@ SELECT thousand, tenthous FROM tenk1
 WHERE thousand < 2 AND tenthous IN (1001,3000)
 ORDER BY thousand;
 
-RESET enable_indexscan;
+RESET enable_indexonlyscan;
 
 --
 -- Check elimination of constant-NULL subexpressions
@@ -980,6 +1009,21 @@ RESET enable_indexscan;
 
 explain (costs off)
   select * from tenk1 where (thousand, tenthous) in ((1,1001), (null,null));
+
+--
+-- Check matching of boolean index columns to WHERE conditions and sort keys
+--
+
+create temp table boolindex (b bool, i int, unique(b, i), junk float);
+
+explain (costs off)
+  select * from boolindex order by b, i limit 10;
+explain (costs off)
+  select * from boolindex where b order by i limit 10;
+explain (costs off)
+  select * from boolindex where b = true order by i desc limit 10;
+explain (costs off)
+  select * from boolindex where not b order by i limit 10;
 
 --
 -- REINDEX (VERBOSE)
@@ -1032,13 +1076,13 @@ REINDEX SCHEMA schema_to_reindex; -- failure, cannot run in a transaction
 END;
 
 -- Failure for unauthorized user
-CREATE ROLE regression_reindexuser NOLOGIN;
-SET SESSION ROLE regression_reindexuser;
+CREATE ROLE regress_reindexuser NOLOGIN;
+SET SESSION ROLE regress_reindexuser;
 REINDEX SCHEMA schema_to_reindex;
 
 -- Clean up
 RESET ROLE;
-DROP ROLE regression_reindexuser;
+DROP ROLE regress_reindexuser;
 SET client_min_messages TO 'warning';
 DROP SCHEMA schema_to_reindex CASCADE;
 RESET client_min_messages;

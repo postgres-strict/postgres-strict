@@ -4,7 +4,7 @@
  *		Functions for finding and validating executable files
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -553,6 +553,7 @@ set_pglocale_pgservice(const char *argv0, const char *app)
 	char		my_exec_path[MAXPGPATH];
 	char		env_path[MAXPGPATH + sizeof("PGSYSCONFDIR=")];	/* longer than
 																 * PGLOCALEDIR */
+	char	   *dup_path;
 
 	/* don't set LC_ALL in the backend */
 	if (strcmp(app, PG_TEXTDOMAIN("postgres")) != 0)
@@ -583,7 +584,9 @@ set_pglocale_pgservice(const char *argv0, const char *app)
 		/* set for libpq to use */
 		snprintf(env_path, sizeof(env_path), "PGLOCALEDIR=%s", path);
 		canonicalize_path(env_path + 12);
-		putenv(strdup(env_path));
+		dup_path = strdup(env_path);
+		if (dup_path)
+			putenv(dup_path);
 	}
 #endif
 
@@ -594,7 +597,9 @@ set_pglocale_pgservice(const char *argv0, const char *app)
 		/* set for libpq to use */
 		snprintf(env_path, sizeof(env_path), "PGSYSCONFDIR=%s", path);
 		canonicalize_path(env_path + 13);
-		putenv(strdup(env_path));
+		dup_path = strdup(env_path);
+		if (dup_path)
+			putenv(dup_path);
 	}
 }
 
@@ -672,15 +677,9 @@ AddUserToTokenDacl(HANDLE hToken)
 		goto cleanup;
 	}
 
-	/*
-	 * Get the user token for the current user, which provides us with the SID
-	 * that is needed for creating the ACL.
-	 */
+	/* Get the current user SID */
 	if (!GetTokenUser(hToken, &pTokenUser))
-	{
-		log_error("could not get user token: error code %lu", GetLastError());
-		goto cleanup;
-	}
+		goto cleanup;			/* callee printed a message */
 
 	/* Figure out the size of the new ACL */
 	dwNewAclSize = asi.AclBytesInUse + sizeof(ACCESS_ALLOWED_ACE) +

@@ -1,5 +1,3 @@
-SELECT name, setting FROM pg_settings WHERE name LIKE 'enable%';
-
 CREATE TABLE foo2(fooid int, f2 int);
 INSERT INTO foo2 VALUES(1, 11);
 INSERT INTO foo2 VALUES(2, 22);
@@ -639,3 +637,14 @@ explain (verbose, costs off)
 select x from int8_tbl, extractq2_2_opt(int8_tbl) f(x);
 
 select x from int8_tbl, extractq2_2_opt(int8_tbl) f(x);
+
+-- check handling of nulls in SRF results (bug #7808)
+
+create type foo2 as (a integer, b text);
+
+select *, row_to_json(u) from unnest(array[(1,'foo')::foo2, null::foo2]) u;
+select *, row_to_json(u) from unnest(array[null::foo2, null::foo2]) u;
+select *, row_to_json(u) from unnest(array[null::foo2, (1,'foo')::foo2, null::foo2]) u;
+select *, row_to_json(u) from unnest(array[]::foo2[]) u;
+
+drop type foo2;

@@ -3,7 +3,7 @@
  * readfuncs.c
  *	  Reader functions for Postgres tree nodes.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -29,6 +29,7 @@
 #include <math.h>
 
 #include "fmgr.h"
+#include "nodes/extensible.h"
 #include "nodes/parsenodes.h"
 #include "nodes/plannodes.h"
 #include "nodes/readfuncs.h"
@@ -171,12 +172,6 @@
 	((length) == 0 ? NULL : debackslash(token, length))
 
 
-static Datum readDatum(bool typbyval);
-static bool *readBoolCols(int numCols);
-static int *readIntCols(int numCols);
-static Oid *readOidCols(int numCols);
-static AttrNumber *readAttrNumberCols(int numCols);
-
 /*
  * _readBitmapset
  */
@@ -218,6 +213,14 @@ _readBitmapset(void)
 	return result;
 }
 
+/*
+ * for use by extensions which define extensible nodes
+ */
+Bitmapset *
+readBitmapset(void)
+{
+	return _readBitmapset();
+}
 
 /*
  * _readQuery
@@ -235,6 +238,7 @@ _readQuery(void)
 	READ_INT_FIELD(resultRelation);
 	READ_BOOL_FIELD(hasAggs);
 	READ_BOOL_FIELD(hasWindowFuncs);
+	READ_BOOL_FIELD(hasTargetSRFs);
 	READ_BOOL_FIELD(hasSubLinks);
 	READ_BOOL_FIELD(hasDistinctOn);
 	READ_BOOL_FIELD(hasRecursive);
@@ -258,6 +262,9 @@ _readQuery(void)
 	READ_NODE_FIELD(rowMarks);
 	READ_NODE_FIELD(setOperations);
 	READ_NODE_FIELD(constraintDeps);
+	/* withCheckOptions intentionally omitted, see comment in parsenodes.h */
+	READ_LOCATION_FIELD(stmt_location);
+	READ_LOCATION_FIELD(stmt_len);
 
 	READ_DONE();
 }
@@ -445,7 +452,7 @@ _readRangeVar(void)
 
 	READ_STRING_FIELD(schemaname);
 	READ_STRING_FIELD(relname);
-	READ_ENUM_FIELD(inhOpt, InhOption);
+	READ_BOOL_FIELD(inh);
 	READ_CHAR_FIELD(relpersistence);
 	READ_NODE_FIELD(alias);
 	READ_LOCATION_FIELD(location);
@@ -545,6 +552,8 @@ _readAggref(void)
 	READ_OID_FIELD(aggtype);
 	READ_OID_FIELD(aggcollid);
 	READ_OID_FIELD(inputcollid);
+	READ_OID_FIELD(aggtranstype);
+	READ_NODE_FIELD(aggargtypes);
 	READ_NODE_FIELD(aggdirectargs);
 	READ_NODE_FIELD(args);
 	READ_NODE_FIELD(aggorder);
@@ -554,6 +563,7 @@ _readAggref(void)
 	READ_BOOL_FIELD(aggvariadic);
 	READ_CHAR_FIELD(aggkind);
 	READ_UINT_FIELD(agglevelsup);
+	READ_ENUM_FIELD(aggsplit, AggSplit);
 	READ_LOCATION_FIELD(location);
 
 	READ_DONE();
@@ -1036,6 +1046,22 @@ _readMinMaxExpr(void)
 }
 
 /*
+ * _readSQLValueFunction
+ */
+static SQLValueFunction *
+_readSQLValueFunction(void)
+{
+	READ_LOCALS(SQLValueFunction);
+
+	READ_ENUM_FIELD(op, SQLValueFunctionOp);
+	READ_OID_FIELD(type);
+	READ_INT_FIELD(typmod);
+	READ_LOCATION_FIELD(location);
+
+	READ_DONE();
+}
+
+/*
  * _readXmlExpr
  */
 static XmlExpr *
@@ -1291,15 +1317,17 @@ _readRangeTblEntry(void)
 			break;
 		case RTE_VALUES:
 			READ_NODE_FIELD(values_lists);
-			READ_NODE_FIELD(values_collations);
+			READ_NODE_FIELD(coltypes);
+			READ_NODE_FIELD(coltypmods);
+			READ_NODE_FIELD(colcollations);
 			break;
 		case RTE_CTE:
 			READ_STRING_FIELD(ctename);
 			READ_UINT_FIELD(ctelevelsup);
 			READ_BOOL_FIELD(self_reference);
-			READ_NODE_FIELD(ctecoltypes);
-			READ_NODE_FIELD(ctecoltypmods);
-			READ_NODE_FIELD(ctecolcollations);
+			READ_NODE_FIELD(coltypes);
+			READ_NODE_FIELD(coltypmods);
+			READ_NODE_FIELD(colcollations);
 			break;
 		default:
 			elog(ERROR, "unrecognized RTE kind: %d",
@@ -1366,6 +1394,7 @@ _readDefElem(void)
 	READ_STRING_FIELD(defname);
 	READ_NODE_FIELD(arg);
 	READ_ENUM_FIELD(defaction, DefElemAction);
+	READ_LOCATION_FIELD(location);
 
 	READ_DONE();
 }
@@ -1384,19 +1413,20 @@ _readPlannedStmt(void)
 	READ_BOOL_FIELD(hasModifyingCTE);
 	READ_BOOL_FIELD(canSetTag);
 	READ_BOOL_FIELD(transientPlan);
+	READ_BOOL_FIELD(dependsOnRole);
+	READ_BOOL_FIELD(parallelModeNeeded);
 	READ_NODE_FIELD(planTree);
 	READ_NODE_FIELD(rtable);
 	READ_NODE_FIELD(resultRelations);
-	READ_NODE_FIELD(utilityStmt);
 	READ_NODE_FIELD(subplans);
 	READ_BITMAPSET_FIELD(rewindPlanIDs);
 	READ_NODE_FIELD(rowMarks);
 	READ_NODE_FIELD(relationOids);
 	READ_NODE_FIELD(invalItems);
 	READ_INT_FIELD(nParamExec);
-	READ_BOOL_FIELD(hasRowSecurity);
-	READ_BOOL_FIELD(parallelModeNeeded);
-	READ_BOOL_FIELD(hasForeignJoin);
+	READ_NODE_FIELD(utilityStmt);
+	READ_LOCATION_FIELD(stmt_location);
+	READ_LOCATION_FIELD(stmt_len);
 
 	READ_DONE();
 }
@@ -1454,6 +1484,19 @@ _readResult(void)
 }
 
 /*
+ * _readProjectSet
+ */
+static ProjectSet *
+_readProjectSet(void)
+{
+	READ_LOCALS_NO_FIELDS(ProjectSet);
+
+	ReadCommonPlan(&local_node->plan);
+
+	READ_DONE();
+}
+
+/*
  * _readModifyTable
  */
 static ModifyTable *
@@ -1472,6 +1515,7 @@ _readModifyTable(void)
 	READ_NODE_FIELD(withCheckOptionLists);
 	READ_NODE_FIELD(returningLists);
 	READ_NODE_FIELD(fdwPrivLists);
+	READ_BITMAPSET_FIELD(fdwDirectModifyPlans);
 	READ_NODE_FIELD(rowMarks);
 	READ_INT_FIELD(epqParam);
 	READ_ENUM_FIELD(onConflictAction, OnConflictAction);
@@ -1797,6 +1841,7 @@ _readForeignScan(void)
 
 	ReadCommonScan(&local_node->scan);
 
+	READ_ENUM_FIELD(operation, CmdType);
 	READ_OID_FIELD(fs_server);
 	READ_NODE_FIELD(fdw_exprs);
 	READ_NODE_FIELD(fdw_private);
@@ -1815,8 +1860,7 @@ static CustomScan *
 _readCustomScan(void)
 {
 	READ_LOCALS(CustomScan);
-	char	   *library_name;
-	char	   *symbol_name;
+	char	   *custom_name;
 	const CustomScanMethods *methods;
 
 	ReadCommonScan(&local_node->scan);
@@ -1828,19 +1872,11 @@ _readCustomScan(void)
 	READ_NODE_FIELD(custom_scan_tlist);
 	READ_BITMAPSET_FIELD(custom_relids);
 
-	/*
-	 * Reconstruction of methods using library and symbol name
-	 */
-	token = pg_strtok(&length);		/* skip methods: */
-	token = pg_strtok(&length);		/* LibraryName */
-	library_name = nullable_string(token, length);
-	token = pg_strtok(&length);		/* SymbolName */
-	symbol_name = nullable_string(token, length);
-
-	methods = (const CustomScanMethods *)
-		load_external_function(library_name, symbol_name, true, NULL);
-	Assert(strcmp(methods->LibraryName, library_name) == 0 &&
-		   strcmp(methods->SymbolName, symbol_name) == 0);
+	/* Lookup CustomScanMethods by CustomName */
+	token = pg_strtok(&length); /* skip methods: */
+	token = pg_strtok(&length); /* CustomName */
+	custom_name = nullable_string(token, length);
+	methods = GetCustomScanMethods(custom_name, false);
 	local_node->methods = methods;
 
 	READ_DONE();
@@ -1988,12 +2024,12 @@ _readAgg(void)
 	ReadCommonPlan(&local_node->plan);
 
 	READ_ENUM_FIELD(aggstrategy, AggStrategy);
+	READ_ENUM_FIELD(aggsplit, AggSplit);
 	READ_INT_FIELD(numCols);
 	READ_ATTRNUMBER_ARRAY(grpColIdx, local_node->numCols);
-	READ_BOOL_FIELD(combineStates);
-	READ_BOOL_FIELD(finalizeAggs);
 	READ_OID_ARRAY(grpOperators, local_node->numCols);
 	READ_LONG_FIELD(numGroups);
+	READ_BITMAPSET_FIELD(aggParams);
 	READ_NODE_FIELD(groupingSets);
 	READ_NODE_FIELD(chain);
 
@@ -2053,6 +2089,7 @@ _readGather(void)
 
 	READ_INT_FIELD(num_workers);
 	READ_BOOL_FIELD(single_copy);
+	READ_BOOL_FIELD(invisible);
 
 	READ_DONE();
 }
@@ -2219,6 +2256,66 @@ _readAlternativeSubPlan(void)
 }
 
 /*
+ * _readExtensibleNode
+ */
+static ExtensibleNode *
+_readExtensibleNode(void)
+{
+	const ExtensibleNodeMethods *methods;
+	ExtensibleNode *local_node;
+	const char *extnodename;
+
+	READ_TEMP_LOCALS();
+
+	token = pg_strtok(&length); /* skip :extnodename */
+	token = pg_strtok(&length); /* get extnodename */
+
+	extnodename = nullable_string(token, length);
+	if (!extnodename)
+		elog(ERROR, "extnodename has to be supplied");
+	methods = GetExtensibleNodeMethods(extnodename, false);
+
+	local_node = (ExtensibleNode *) newNode(methods->node_size,
+											T_ExtensibleNode);
+	local_node->extnodename = extnodename;
+
+	/* deserialize the private fields */
+	methods->nodeRead(local_node);
+
+	READ_DONE();
+}
+
+/*
+ * _readPartitionBoundSpec
+ */
+static PartitionBoundSpec *
+_readPartitionBoundSpec(void)
+{
+	READ_LOCALS(PartitionBoundSpec);
+
+	READ_CHAR_FIELD(strategy);
+	READ_NODE_FIELD(listdatums);
+	READ_NODE_FIELD(lowerdatums);
+	READ_NODE_FIELD(upperdatums);
+
+	READ_DONE();
+}
+
+/*
+ * _readPartitionRangeDatum
+ */
+static PartitionRangeDatum *
+_readPartitionRangeDatum(void)
+{
+	READ_LOCALS(PartitionRangeDatum);
+
+	READ_BOOL_FIELD(infinite);
+	READ_NODE_FIELD(value);
+
+	READ_DONE();
+}
+
+/*
  * parseNodeString
  *
  * Given a character string representing a node tree, parseNodeString creates
@@ -2320,6 +2417,8 @@ parseNodeString(void)
 		return_value = _readCoalesceExpr();
 	else if (MATCH("MINMAX", 6))
 		return_value = _readMinMaxExpr();
+	else if (MATCH("SQLVALUEFUNCTION", 16))
+		return_value = _readSQLValueFunction();
 	else if (MATCH("XMLEXPR", 7))
 		return_value = _readXmlExpr();
 	else if (MATCH("NULLTEST", 8))
@@ -2364,6 +2463,8 @@ parseNodeString(void)
 		return_value = _readPlan();
 	else if (MATCH("RESULT", 6))
 		return_value = _readResult();
+	else if (MATCH("PROJECTSET", 10))
+		return_value = _readProjectSet();
 	else if (MATCH("MODIFYTABLE", 11))
 		return_value = _readModifyTable();
 	else if (MATCH("APPEND", 6))
@@ -2446,6 +2547,12 @@ parseNodeString(void)
 		return_value = _readSubPlan();
 	else if (MATCH("ALTERNATIVESUBPLAN", 18))
 		return_value = _readAlternativeSubPlan();
+	else if (MATCH("EXTENSIBLENODE", 14))
+		return_value = _readExtensibleNode();
+	else if (MATCH("PARTITIONBOUND", 14))
+		return_value = _readPartitionBoundSpec();
+	else if (MATCH("PARTRANGEDATUM", 14))
+		return_value = _readPartitionRangeDatum();
 	else
 	{
 		elog(ERROR, "badly formatted node string \"%.32s\"...", token);
@@ -2463,7 +2570,7 @@ parseNodeString(void)
  * Datum.  The string representation embeds length info, but not byValue,
  * so we must be told that.
  */
-static Datum
+Datum
 readDatum(bool typbyval)
 {
 	Size		length,
@@ -2520,7 +2627,7 @@ readDatum(bool typbyval)
 /*
  * readAttrNumberCols
  */
-static AttrNumber *
+AttrNumber *
 readAttrNumberCols(int numCols)
 {
 	int			tokenLength,
@@ -2544,7 +2651,7 @@ readAttrNumberCols(int numCols)
 /*
  * readOidCols
  */
-static Oid *
+Oid *
 readOidCols(int numCols)
 {
 	int			tokenLength,
@@ -2568,7 +2675,7 @@ readOidCols(int numCols)
 /*
  * readIntCols
  */
-static int *
+int *
 readIntCols(int numCols)
 {
 	int			tokenLength,
@@ -2592,7 +2699,7 @@ readIntCols(int numCols)
 /*
  * readBoolCols
  */
-static bool *
+bool *
 readBoolCols(int numCols)
 {
 	int			tokenLength,

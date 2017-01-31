@@ -6,7 +6,7 @@
  * There is hardly anything left of Paul Brown's original implementation...
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  *
@@ -204,9 +204,7 @@ cluster(ClusterStmt *stmt, bool isTopLevel)
 		 */
 		cluster_context = AllocSetContextCreate(PortalContext,
 												"Cluster",
-												ALLOCSET_DEFAULT_MINSIZE,
-												ALLOCSET_DEFAULT_INITSIZE,
-												ALLOCSET_DEFAULT_MAXSIZE);
+												ALLOCSET_DEFAULT_SIZES);
 
 		/*
 		 * Build the list of relations to cluster.  Note that this lives in
@@ -248,7 +246,7 @@ cluster(ClusterStmt *stmt, bool isTopLevel)
  * swapping the relfilenodes of the new table and the old table, so
  * the OID of the original table is preserved.  Thus we do not lose
  * GRANT, inheritance nor references to this table (this was a bug
- * in releases thru 7.3).
+ * in releases through 7.3).
  *
  * Indexes are rebuilt too, via REINDEX. Since we are effectively bulk-loading
  * the new table, it's better to create the indexes afterwards than to fill
@@ -1059,11 +1057,10 @@ copy_heap_data(Oid OIDNewHeap, Oid OIDOldHeap, Oid OIDOldIndex, bool verbose,
 		for (;;)
 		{
 			HeapTuple	tuple;
-			bool		shouldfree;
 
 			CHECK_FOR_INTERRUPTS();
 
-			tuple = tuplesort_getheaptuple(tuplesort, true, &shouldfree);
+			tuple = tuplesort_getheaptuple(tuplesort, true);
 			if (tuple == NULL)
 				break;
 
@@ -1071,9 +1068,6 @@ copy_heap_data(Oid OIDNewHeap, Oid OIDOldHeap, Oid OIDOldIndex, bool verbose,
 									 oldTupDesc, newTupDesc,
 									 values, isnull,
 									 NewHeap->rd_rel->relhasoids, rwstate);
-
-			if (shouldfree)
-				heap_freetuple(tuple);
 		}
 
 		tuplesort_end(tuplesort);

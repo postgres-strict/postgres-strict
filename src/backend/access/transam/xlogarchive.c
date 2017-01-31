@@ -4,7 +4,7 @@
  *		Functions for archiving WAL files and restoring from the archive.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/xlogarchive.c
@@ -421,7 +421,7 @@ ExecuteRecoveryCommand(char *command, char *commandName, bool failOnSignal)
 /*
  * A file was restored from the archive under a temporary filename (path),
  * and now we want to keep it. Rename it under the permanent filename in
- * in pg_xlog (xlogfname), replacing any existing file with the same name.
+ * in pg_wal (xlogfname), replacing any existing file with the same name.
  */
 void
 KeepFileRestoredFromArchive(char *path, char *xlogfname)
@@ -470,11 +470,7 @@ KeepFileRestoredFromArchive(char *path, char *xlogfname)
 		reload = true;
 	}
 
-	if (rename(path, xlogfpath) < 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not rename file \"%s\" to \"%s\": %m",
-						path, xlogfpath)));
+	durable_rename(path, xlogfpath, ERROR);
 
 	/*
 	 * Create .done file forcibly to prevent the restored segment from being
@@ -580,12 +576,7 @@ XLogArchiveForceDone(const char *xlog)
 	StatusFilePath(archiveReady, xlog, ".ready");
 	if (stat(archiveReady, &stat_buf) == 0)
 	{
-		if (rename(archiveReady, archiveDone) < 0)
-			ereport(WARNING,
-					(errcode_for_file_access(),
-					 errmsg("could not rename file \"%s\" to \"%s\": %m",
-							archiveReady, archiveDone)));
-
+		(void) durable_rename(archiveReady, archiveDone, WARNING);
 		return;
 	}
 

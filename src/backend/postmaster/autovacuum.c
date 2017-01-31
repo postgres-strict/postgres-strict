@@ -50,7 +50,7 @@
  * there is a window (caused by pgstat delay) on which a worker may choose a
  * table that was already vacuumed; this is a bug in the current design.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -87,6 +87,7 @@
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
+#include "storage/lmgr.h"
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "storage/procsignal.h"
@@ -190,6 +191,7 @@ typedef struct autovac_table
 	int			at_vacuum_cost_delay;
 	int			at_vacuum_cost_limit;
 	bool		at_dobalance;
+	bool		at_sharedrel;
 	char	   *at_relname;
 	char	   *at_nspname;
 	char	   *at_datname;
@@ -203,6 +205,7 @@ typedef struct autovac_table
  * wi_links		entry into free list or running list
  * wi_dboid		OID of the database this worker is supposed to work on
  * wi_tableoid	OID of the table currently being vacuumed, if any
+ * wi_sharedrel flag indicating whether table is marked relisshared
  * wi_proc		pointer to PGPROC of the running worker, NULL if not started
  * wi_launchtime Time at which this worker was launched
  * wi_cost_*	Vacuum cost-based delay parameters current in this worker
@@ -220,6 +223,7 @@ typedef struct WorkerInfoData
 	PGPROC	   *wi_proc;
 	TimestampTz wi_launchtime;
 	bool		wi_dobalance;
+	bool		wi_sharedrel;
 	int			wi_cost_delay;
 	int			wi_cost_limit;
 	int			wi_cost_limit_base;
@@ -459,9 +463,7 @@ AutoVacLauncherMain(int argc, char *argv[])
 	 */
 	AutovacMemCxt = AllocSetContextCreate(TopMemoryContext,
 										  "Autovacuum Launcher",
-										  ALLOCSET_DEFAULT_MINSIZE,
-										  ALLOCSET_DEFAULT_INITSIZE,
-										  ALLOCSET_DEFAULT_MAXSIZE);
+										  ALLOCSET_DEFAULT_SIZES);
 	MemoryContextSwitchTo(AutovacMemCxt);
 
 	/*
@@ -535,11 +537,13 @@ AutoVacLauncherMain(int argc, char *argv[])
 	SetConfigOption("zero_damaged_pages", "false", PGC_SUSET, PGC_S_OVERRIDE);
 
 	/*
-	 * Force statement_timeout and lock_timeout to zero to avoid letting these
-	 * settings prevent regular maintenance from being executed.
+	 * Force settable timeouts off to avoid letting these settings prevent
+	 * regular maintenance from being executed.
 	 */
 	SetConfigOption("statement_timeout", "0", PGC_SUSET, PGC_S_OVERRIDE);
 	SetConfigOption("lock_timeout", "0", PGC_SUSET, PGC_S_OVERRIDE);
+	SetConfigOption("idle_in_transaction_session_timeout", "0",
+					PGC_SUSET, PGC_S_OVERRIDE);
 
 	/*
 	 * Force default_transaction_isolation to READ COMMITTED.  We don't want
@@ -595,7 +599,8 @@ AutoVacLauncherMain(int argc, char *argv[])
 		 */
 		rc = WaitLatch(MyLatch,
 					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-					   (nap.tv_sec * 1000L) + (nap.tv_usec / 1000L));
+					   (nap.tv_sec * 1000L) + (nap.tv_usec / 1000L),
+					   WAIT_EVENT_AUTOVACUUM_MAIN);
 
 		ResetLatch(MyLatch);
 
@@ -669,9 +674,9 @@ AutoVacLauncherMain(int argc, char *argv[])
 
 		/*
 		 * There are some conditions that we need to check before trying to
-		 * start a worker.  First, we need to make sure that there is a
-		 * worker slot available.  Second, we need to make sure that no
-		 * other worker failed while starting up.
+		 * start a worker.  First, we need to make sure that there is a worker
+		 * slot available.  Second, we need to make sure that no other worker
+		 * failed while starting up.
 		 */
 
 		current_time = GetCurrentTimestamp();
@@ -717,6 +722,7 @@ AutoVacLauncherMain(int argc, char *argv[])
 					worker = AutoVacuumShmem->av_startingWorker;
 					worker->wi_dboid = InvalidOid;
 					worker->wi_tableoid = InvalidOid;
+					worker->wi_sharedrel = false;
 					worker->wi_proc = NULL;
 					worker->wi_launchtime = 0;
 					dlist_push_head(&AutoVacuumShmem->av_freeWorkers,
@@ -888,14 +894,10 @@ rebuild_database_list(Oid newdb)
 
 	newcxt = AllocSetContextCreate(AutovacMemCxt,
 								   "AV dblist",
-								   ALLOCSET_DEFAULT_MINSIZE,
-								   ALLOCSET_DEFAULT_INITSIZE,
-								   ALLOCSET_DEFAULT_MAXSIZE);
+								   ALLOCSET_DEFAULT_SIZES);
 	tmpcxt = AllocSetContextCreate(newcxt,
 								   "tmp AV dblist",
-								   ALLOCSET_DEFAULT_MINSIZE,
-								   ALLOCSET_DEFAULT_INITSIZE,
-								   ALLOCSET_DEFAULT_MAXSIZE);
+								   ALLOCSET_DEFAULT_SIZES);
 	oldcxt = MemoryContextSwitchTo(tmpcxt);
 
 	/*
@@ -1105,9 +1107,7 @@ do_start_worker(void)
 	 */
 	tmpcxt = AllocSetContextCreate(CurrentMemoryContext,
 								   "Start worker tmp cxt",
-								   ALLOCSET_DEFAULT_MINSIZE,
-								   ALLOCSET_DEFAULT_INITSIZE,
-								   ALLOCSET_DEFAULT_MAXSIZE);
+								   ALLOCSET_DEFAULT_SIZES);
 	oldcxt = MemoryContextSwitchTo(tmpcxt);
 
 	/* use fresh stats */
@@ -1547,11 +1547,13 @@ AutoVacWorkerMain(int argc, char *argv[])
 	SetConfigOption("zero_damaged_pages", "false", PGC_SUSET, PGC_S_OVERRIDE);
 
 	/*
-	 * Force statement_timeout and lock_timeout to zero to avoid letting these
-	 * settings prevent regular maintenance from being executed.
+	 * Force settable timeouts off to avoid letting these settings prevent
+	 * regular maintenance from being executed.
 	 */
 	SetConfigOption("statement_timeout", "0", PGC_SUSET, PGC_S_OVERRIDE);
 	SetConfigOption("lock_timeout", "0", PGC_SUSET, PGC_S_OVERRIDE);
+	SetConfigOption("idle_in_transaction_session_timeout", "0",
+					PGC_SUSET, PGC_S_OVERRIDE);
 
 	/*
 	 * Force default_transaction_isolation to READ COMMITTED.  We don't want
@@ -1683,6 +1685,7 @@ FreeWorkerInfo(int code, Datum arg)
 		dlist_delete(&MyWorkerInfo->wi_links);
 		MyWorkerInfo->wi_dboid = InvalidOid;
 		MyWorkerInfo->wi_tableoid = InvalidOid;
+		MyWorkerInfo->wi_sharedrel = false;
 		MyWorkerInfo->wi_proc = NULL;
 		MyWorkerInfo->wi_launchtime = 0;
 		MyWorkerInfo->wi_dobalance = false;
@@ -1885,6 +1888,7 @@ do_autovacuum(void)
 	HeapScanDesc relScan;
 	Form_pg_database dbForm;
 	List	   *table_oids = NIL;
+	List	   *orphan_oids = NIL;
 	HASHCTL		ctl;
 	HTAB	   *table_toast_map;
 	ListCell   *volatile cell;
@@ -1894,6 +1898,8 @@ do_autovacuum(void)
 	ScanKeyData key;
 	TupleDesc	pg_class_desc;
 	int			effective_multixact_freeze_max_age;
+	bool		did_vacuum = false;
+	bool		found_concurrent_worker = false;
 
 	/*
 	 * StartTransactionCommand and CommitTransactionCommand will automatically
@@ -1902,9 +1908,7 @@ do_autovacuum(void)
 	 */
 	AutovacMemCxt = AllocSetContextCreate(TopMemoryContext,
 										  "AV worker",
-										  ALLOCSET_DEFAULT_MINSIZE,
-										  ALLOCSET_DEFAULT_INITSIZE,
-										  ALLOCSET_DEFAULT_MAXSIZE);
+										  ALLOCSET_DEFAULT_SIZES);
 	MemoryContextSwitchTo(AutovacMemCxt);
 
 	/*
@@ -1986,7 +1990,7 @@ do_autovacuum(void)
 	 * TOAST tables. The reason for doing the second pass is that during it we
 	 * want to use the main relation's pg_class.reloptions entry if the TOAST
 	 * table does not have any, and we cannot obtain it unless we know
-	 * beforehand what's the main  table OID.
+	 * beforehand what's the main table OID.
 	 *
 	 * We need to check TOAST tables separately because in cases with short,
 	 * wide tables there might be proportionally much more activity in the
@@ -2014,16 +2018,6 @@ do_autovacuum(void)
 
 		relid = HeapTupleGetOid(tuple);
 
-		/* Fetch reloptions and the pgstat entry for this table */
-		relopts = extract_autovac_opts(tuple, pg_class_desc);
-		tabentry = get_pgstat_tabentry_relid(relid, classForm->relisshared,
-											 shared, dbentry);
-
-		/* Check if it needs vacuum or analyze */
-		relation_needs_vacanalyze(relid, relopts, classForm, tabentry,
-								  effective_multixact_freeze_max_age,
-								  &dovacuum, &doanalyze, &wraparound);
-
 		/*
 		 * Check if it is a temp table (presumably, of some other backend's).
 		 * We cannot safely process other backends' temp tables.
@@ -2035,69 +2029,60 @@ do_autovacuum(void)
 			backendID = GetTempNamespaceBackendId(classForm->relnamespace);
 
 			/* We just ignore it if the owning backend is still active */
-			if (backendID == MyBackendId || BackendIdGetProc(backendID) == NULL)
+			if (backendID != InvalidBackendId &&
+				(backendID == MyBackendId ||
+				 BackendIdGetProc(backendID) == NULL))
 			{
 				/*
-				 * We found an orphan temp table (which was probably left
-				 * behind by a crashed backend).  If it's so old as to need
-				 * vacuum for wraparound, forcibly drop it.  Otherwise just
-				 * log a complaint.
+				 * The table seems to be orphaned -- although it might be that
+				 * the owning backend has already deleted it and exited; our
+				 * pg_class scan snapshot is not necessarily up-to-date
+				 * anymore, so we could be looking at a committed-dead entry.
+				 * Remember it so we can try to delete it later.
 				 */
-				if (wraparound)
-				{
-					ObjectAddress object;
-
-					ereport(LOG,
-							(errmsg("autovacuum: dropping orphan temp table \"%s\".\"%s\" in database \"%s\"",
-								 get_namespace_name(classForm->relnamespace),
-									NameStr(classForm->relname),
-									get_database_name(MyDatabaseId))));
-					object.classId = RelationRelationId;
-					object.objectId = relid;
-					object.objectSubId = 0;
-					performDeletion(&object, DROP_CASCADE, PERFORM_DELETION_INTERNAL);
-				}
-				else
-				{
-					ereport(LOG,
-							(errmsg("autovacuum: found orphan temp table \"%s\".\"%s\" in database \"%s\"",
-								 get_namespace_name(classForm->relnamespace),
-									NameStr(classForm->relname),
-									get_database_name(MyDatabaseId))));
-				}
+				orphan_oids = lappend_oid(orphan_oids, relid);
 			}
+			continue;
 		}
-		else
+
+		/* Fetch reloptions and the pgstat entry for this table */
+		relopts = extract_autovac_opts(tuple, pg_class_desc);
+		tabentry = get_pgstat_tabentry_relid(relid, classForm->relisshared,
+											 shared, dbentry);
+
+		/* Check if it needs vacuum or analyze */
+		relation_needs_vacanalyze(relid, relopts, classForm, tabentry,
+								  effective_multixact_freeze_max_age,
+								  &dovacuum, &doanalyze, &wraparound);
+
+		/* Relations that need work are added to table_oids */
+		if (dovacuum || doanalyze)
+			table_oids = lappend_oid(table_oids, relid);
+
+		/*
+		 * Remember TOAST associations for the second pass.  Note: we must do
+		 * this whether or not the table is going to be vacuumed, because we
+		 * don't automatically vacuum toast tables along the parent table.
+		 */
+		if (OidIsValid(classForm->reltoastrelid))
 		{
-			/* relations that need work are added to table_oids */
-			if (dovacuum || doanalyze)
-				table_oids = lappend_oid(table_oids, relid);
+			av_relation *hentry;
+			bool		found;
 
-			/*
-			 * Remember the association for the second pass.  Note: we must do
-			 * this even if the table is going to be vacuumed, because we
-			 * don't automatically vacuum toast tables along the parent table.
-			 */
-			if (OidIsValid(classForm->reltoastrelid))
+			hentry = hash_search(table_toast_map,
+								 &classForm->reltoastrelid,
+								 HASH_ENTER, &found);
+
+			if (!found)
 			{
-				av_relation *hentry;
-				bool		found;
-
-				hentry = hash_search(table_toast_map,
-									 &classForm->reltoastrelid,
-									 HASH_ENTER, &found);
-
-				if (!found)
+				/* hash_search already filled in the key */
+				hentry->ar_relid = relid;
+				hentry->ar_hasrelopts = false;
+				if (relopts != NULL)
 				{
-					/* hash_search already filled in the key */
-					hentry->ar_relid = relid;
-					hentry->ar_hasrelopts = false;
-					if (relopts != NULL)
-					{
-						hentry->ar_hasrelopts = true;
-						memcpy(&hentry->ar_reloptions, relopts,
-							   sizeof(AutoVacOpts));
-					}
+					hentry->ar_hasrelopts = true;
+					memcpy(&hentry->ar_reloptions, relopts,
+						   sizeof(AutoVacOpts));
 				}
 			}
 		}
@@ -2162,6 +2147,96 @@ do_autovacuum(void)
 	heap_close(classRel, AccessShareLock);
 
 	/*
+	 * Recheck orphan temporary tables, and if they still seem orphaned, drop
+	 * them.  We'll eat a transaction per dropped table, which might seem
+	 * excessive, but we should only need to do anything as a result of a
+	 * previous backend crash, so this should not happen often enough to
+	 * justify "optimizing".  Using separate transactions ensures that we
+	 * don't bloat the lock table if there are many temp tables to be dropped,
+	 * and it ensures that we don't lose work if a deletion attempt fails.
+	 */
+	foreach(cell, orphan_oids)
+	{
+		Oid			relid = lfirst_oid(cell);
+		Form_pg_class classForm;
+		int			backendID;
+		ObjectAddress object;
+
+		/*
+		 * Check for user-requested abort.
+		 */
+		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * Try to lock the table.  If we can't get the lock immediately,
+		 * somebody else is using (or dropping) the table, so it's not our
+		 * concern anymore.  Having the lock prevents race conditions below.
+		 */
+		if (!ConditionalLockRelationOid(relid, AccessExclusiveLock))
+			continue;
+
+		/*
+		 * Re-fetch the pg_class tuple and re-check whether it still seems to
+		 * be an orphaned temp table.  If it's not there or no longer the same
+		 * relation, ignore it.
+		 */
+		tuple = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid));
+		if (!HeapTupleIsValid(tuple))
+		{
+			/* be sure to drop useless lock so we don't bloat lock table */
+			UnlockRelationOid(relid, AccessExclusiveLock);
+			continue;
+		}
+		classForm = (Form_pg_class) GETSTRUCT(tuple);
+
+		/*
+		 * Make all the same tests made in the loop above.  In event of OID
+		 * counter wraparound, the pg_class entry we have now might be
+		 * completely unrelated to the one we saw before.
+		 */
+		if (!((classForm->relkind == RELKIND_RELATION ||
+			   classForm->relkind == RELKIND_MATVIEW) &&
+			  classForm->relpersistence == RELPERSISTENCE_TEMP))
+		{
+			UnlockRelationOid(relid, AccessExclusiveLock);
+			continue;
+		}
+		backendID = GetTempNamespaceBackendId(classForm->relnamespace);
+		if (!(backendID != InvalidBackendId &&
+			  (backendID == MyBackendId ||
+			   BackendIdGetProc(backendID) == NULL)))
+		{
+			UnlockRelationOid(relid, AccessExclusiveLock);
+			continue;
+		}
+
+		/* OK, let's delete it */
+		ereport(LOG,
+				(errmsg("autovacuum: dropping orphan temp table \"%s.%s.%s\"",
+						get_database_name(MyDatabaseId),
+						get_namespace_name(classForm->relnamespace),
+						NameStr(classForm->relname))));
+
+		object.classId = RelationRelationId;
+		object.objectId = relid;
+		object.objectSubId = 0;
+		performDeletion(&object, DROP_CASCADE,
+						PERFORM_DELETION_INTERNAL |
+						PERFORM_DELETION_QUIETLY |
+						PERFORM_DELETION_SKIP_EXTENSIONS);
+
+		/*
+		 * To commit the deletion, end current transaction and start a new
+		 * one.  Note this also releases the lock we took.
+		 */
+		CommitTransactionCommand();
+		StartTransactionCommand();
+
+		/* StartTransactionCommand changed current memory context */
+		MemoryContextSwitchTo(AutovacMemCxt);
+	}
+
+	/*
 	 * Create a buffer access strategy object for VACUUM to use.  We want to
 	 * use the same one across all the vacuum operations we perform, since the
 	 * point is for VACUUM not to blow out the shared cache.
@@ -2174,9 +2249,7 @@ do_autovacuum(void)
 	 */
 	PortalContext = AllocSetContextCreate(AutovacMemCxt,
 										  "Autovacuum Portal",
-										  ALLOCSET_DEFAULT_INITSIZE,
-										  ALLOCSET_DEFAULT_MINSIZE,
-										  ALLOCSET_DEFAULT_MAXSIZE);
+										  ALLOCSET_DEFAULT_SIZES);
 
 	/*
 	 * Perform operations on collected tables.
@@ -2229,13 +2302,14 @@ do_autovacuum(void)
 			if (worker == MyWorkerInfo)
 				continue;
 
-			/* ignore workers in other databases */
-			if (worker->wi_dboid != MyDatabaseId)
+			/* ignore workers in other databases (unless table is shared) */
+			if (!worker->wi_sharedrel && worker->wi_dboid != MyDatabaseId)
 				continue;
 
 			if (worker->wi_tableoid == relid)
 			{
 				skipit = true;
+				found_concurrent_worker = true;
 				break;
 			}
 		}
@@ -2271,6 +2345,7 @@ do_autovacuum(void)
 		 * the lock so that other workers don't vacuum it concurrently.
 		 */
 		MyWorkerInfo->wi_tableoid = relid;
+		MyWorkerInfo->wi_sharedrel = tab->at_sharedrel;
 		LWLockRelease(AutovacuumScheduleLock);
 
 		/*
@@ -2361,6 +2436,8 @@ do_autovacuum(void)
 		}
 		PG_END_TRY();
 
+		did_vacuum = true;
+
 		/* the PGXACT flags are reset at the next end of transaction */
 
 		/* be tidy */
@@ -2382,6 +2459,7 @@ deleted:
 		 */
 		LWLockAcquire(AutovacuumLock, LW_EXCLUSIVE);
 		MyWorkerInfo->wi_tableoid = InvalidOid;
+		MyWorkerInfo->wi_sharedrel = false;
 		LWLockRelease(AutovacuumLock);
 
 		/* restore vacuum cost GUCs for the next iteration */
@@ -2397,8 +2475,25 @@ deleted:
 	/*
 	 * Update pg_database.datfrozenxid, and truncate pg_clog if possible. We
 	 * only need to do this once, not after each table.
+	 *
+	 * Even if we didn't vacuum anything, it may still be important to do
+	 * this, because one indirect effect of vac_update_datfrozenxid() is to
+	 * update ShmemVariableCache->xidVacLimit.  That might need to be done
+	 * even if we haven't vacuumed anything, because relations with older
+	 * relfrozenxid values or other databases with older datfrozenxid values
+	 * might have been dropped, allowing xidVacLimit to advance.
+	 *
+	 * However, it's also important not to do this blindly in all cases,
+	 * because when autovacuum=off this will restart the autovacuum launcher.
+	 * If we're not careful, an infinite loop can result, where workers find
+	 * no work to do and restart the launcher, which starts another worker in
+	 * the same database that finds no work to do.  To prevent that, we skip
+	 * this if (1) we found no work to do and (2) we skipped at least one
+	 * table due to concurrent autovacuum activity.  In that case, the other
+	 * worker has already done it, or will do so when it finishes.
 	 */
-	vac_update_datfrozenxid();
+	if (did_vacuum || !found_concurrent_worker)
+		vac_update_datfrozenxid();
 
 	/* Finally close out the last transaction. */
 	CommitTransactionCommand();
@@ -2577,6 +2672,7 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 
 		tab = palloc(sizeof(autovac_table));
 		tab->at_relid = relid;
+		tab->at_sharedrel = classForm->relisshared;
 		tab->at_vacoptions = VACOPT_SKIPTOAST |
 			(dovacuum ? VACOPT_VACUUM : 0) |
 			(doanalyze ? VACOPT_ANALYZE : 0) |
@@ -2780,7 +2876,7 @@ relation_needs_vacanalyze(Oid relid,
 		*doanalyze = false;
 	}
 
-	/* ANALYZE refuses to work with pg_statistics */
+	/* ANALYZE refuses to work with pg_statistic */
 	if (relid == StatisticRelationId)
 		*doanalyze = false;
 }

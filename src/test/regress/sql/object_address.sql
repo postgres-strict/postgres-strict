@@ -4,10 +4,10 @@
 
 -- Clean up in case a prior regression run failed
 SET client_min_messages TO 'warning';
+DROP ROLE IF EXISTS regress_addr_user;
+RESET client_min_messages;
 
-DROP ROLE IF EXISTS regtest_addr_user;
-
-CREATE USER regtest_addr_user;
+CREATE USER regress_addr_user;
 
 -- Test generic object addressing/identification functions
 CREATE SCHEMA addr_nsp;
@@ -33,12 +33,14 @@ CREATE FUNCTION addr_nsp.trig() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN END
 CREATE TRIGGER t BEFORE INSERT ON addr_nsp.gentable FOR EACH ROW EXECUTE PROCEDURE addr_nsp.trig();
 CREATE POLICY genpol ON addr_nsp.gentable;
 CREATE SERVER "integer" FOREIGN DATA WRAPPER addr_fdw;
-CREATE USER MAPPING FOR regtest_addr_user SERVER "integer";
-ALTER DEFAULT PRIVILEGES FOR ROLE regtest_addr_user IN SCHEMA public GRANT ALL ON TABLES TO regtest_addr_user;
-ALTER DEFAULT PRIVILEGES FOR ROLE regtest_addr_user REVOKE DELETE ON TABLES FROM regtest_addr_user;
+CREATE USER MAPPING FOR regress_addr_user SERVER "integer";
+ALTER DEFAULT PRIVILEGES FOR ROLE regress_addr_user IN SCHEMA public GRANT ALL ON TABLES TO regress_addr_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE regress_addr_user REVOKE DELETE ON TABLES FROM regress_addr_user;
 CREATE TRANSFORM FOR int LANGUAGE SQL (
 	FROM SQL WITH FUNCTION varchar_transform(internal),
 	TO SQL WITH FUNCTION int4recv(internal));
+CREATE PUBLICATION addr_pub FOR TABLE addr_nsp.gentable;
+CREATE SUBSCRIPTION addr_sub CONNECTION '' PUBLICATION bar WITH (DISABLED, NOCREATE SLOT);
 
 -- test some error cases
 SELECT pg_get_object_address('stone', '{}', '{}');
@@ -78,7 +80,8 @@ BEGIN
 		('text search parser'), ('text search dictionary'),
 		('text search template'), ('text search configuration'),
 		('policy'), ('user mapping'), ('default acl'), ('transform'),
-		('operator of access method'), ('function of access method')
+		('operator of access method'), ('function of access method'),
+		('publication relation')
 	LOOP
 		FOR names IN VALUES ('{eins}'), ('{addr_nsp, zwei}'), ('{eins, zwei, drei}')
 		LOOP
@@ -117,6 +120,12 @@ SELECT pg_get_object_address('extension', '{one}', '{}');
 SELECT pg_get_object_address('extension', '{one,two}', '{}');
 SELECT pg_get_object_address('event trigger', '{one}', '{}');
 SELECT pg_get_object_address('event trigger', '{one,two}', '{}');
+SELECT pg_get_object_address('access method', '{one}', '{}');
+SELECT pg_get_object_address('access method', '{one,two}', '{}');
+SELECT pg_get_object_address('publication', '{one}', '{}');
+SELECT pg_get_object_address('publication', '{one,two}', '{}');
+SELECT pg_get_object_address('subscription', '{one}', '{}');
+SELECT pg_get_object_address('subscription', '{one,two}', '{}');
 
 -- test successful cases
 WITH objects (type, name, args) AS (VALUES
@@ -155,18 +164,22 @@ WITH objects (type, name, args) AS (VALUES
 				('text search dictionary', '{addr_ts_dict}', '{}'),
 				('text search template', '{addr_ts_temp}', '{}'),
 				('text search configuration', '{addr_ts_conf}', '{}'),
-				('role', '{regtest_addr_user}', '{}'),
+				('role', '{regress_addr_user}', '{}'),
 				-- database
 				-- tablespace
 				('foreign-data wrapper', '{addr_fdw}', '{}'),
 				('server', '{addr_fserv}', '{}'),
-				('user mapping', '{regtest_addr_user}', '{integer}'),
-				('default acl', '{regtest_addr_user,public}', '{r}'),
-				('default acl', '{regtest_addr_user}', '{r}'),
+				('user mapping', '{regress_addr_user}', '{integer}'),
+				('default acl', '{regress_addr_user,public}', '{r}'),
+				('default acl', '{regress_addr_user}', '{r}'),
 				-- extension
 				-- event trigger
 				('policy', '{addr_nsp, gentable, genpol}', '{}'),
-				('transform', '{int}', '{sql}')
+				('transform', '{int}', '{sql}'),
+				('access method', '{btree}', '{}'),
+				('publication', '{addr_pub}', '{}'),
+				('publication relation', '{addr_nsp, gentable}', '{addr_pub}'),
+				('subscription', '{addr_sub}', '{}')
         )
 SELECT (pg_identify_object(addr1.classid, addr1.objid, addr1.subobjid)).*,
 	-- test roundtrip through pg_identify_object_as_address
@@ -180,9 +193,13 @@ SELECT (pg_identify_object(addr1.classid, addr1.objid, addr1.subobjid)).*,
 ---
 --- Cleanup resources
 ---
+SET client_min_messages TO 'warning';
+
 DROP FOREIGN DATA WRAPPER addr_fdw CASCADE;
+DROP PUBLICATION addr_pub;
+DROP SUBSCRIPTION addr_sub NODROP SLOT;
 
 DROP SCHEMA addr_nsp CASCADE;
 
-DROP OWNED BY regtest_addr_user;
-DROP USER regtest_addr_user;
+DROP OWNED BY regress_addr_user;
+DROP USER regress_addr_user;

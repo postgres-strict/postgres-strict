@@ -3,7 +3,7 @@
  * tsvector.c
  *	  I/O functions for tsvector
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -17,6 +17,7 @@
 #include "libpq/pqformat.h"
 #include "tsearch/ts_locale.h"
 #include "tsearch/ts_utils.h"
+#include "utils/builtins.h"
 #include "utils/memutils.h"
 
 typedef struct
@@ -28,8 +29,8 @@ typedef struct
 
 
 /* Compare two WordEntryPos values for qsort */
-static int
-comparePos(const void *a, const void *b)
+int
+compareWordEntryPos(const void *a, const void *b)
 {
 	int			apos = WEP_GETPOS(*(const WordEntryPos *) a);
 	int			bpos = WEP_GETPOS(*(const WordEntryPos *) b);
@@ -54,7 +55,7 @@ uniquePos(WordEntryPos *a, int l)
 	if (l <= 1)
 		return l;
 
-	qsort((void *) a, l, sizeof(WordEntryPos), comparePos);
+	qsort((void *) a, l, sizeof(WordEntryPos), compareWordEntryPos);
 
 	res = a;
 	ptr = a + 1;

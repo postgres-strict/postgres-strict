@@ -3,7 +3,7 @@
  * parse_expr.c
  *	  handle expressions in parser
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -34,7 +34,9 @@
 #include "parser/parse_type.h"
 #include "parser/parse_agg.h"
 #include "utils/builtins.h"
+#include "utils/date.h"
 #include "utils/lsyscache.h"
+#include "utils/timestamp.h"
 #include "utils/xml.h"
 
 
@@ -104,9 +106,11 @@ static Node *transformCaseExpr(ParseState *pstate, CaseExpr *c);
 static Node *transformSubLink(ParseState *pstate, SubLink *sublink);
 static Node *transformArrayExpr(ParseState *pstate, A_ArrayExpr *a,
 				   Oid array_type, Oid element_type, int32 typmod);
-static Node *transformRowExpr(ParseState *pstate, RowExpr *r);
+static Node *transformRowExpr(ParseState *pstate, RowExpr *r, bool allowDefault);
 static Node *transformCoalesceExpr(ParseState *pstate, CoalesceExpr *c);
 static Node *transformMinMaxExpr(ParseState *pstate, MinMaxExpr *m);
+static Node *transformSQLValueFunction(ParseState *pstate,
+						  SQLValueFunction *svf);
 static Node *transformXmlExpr(ParseState *pstate, XmlExpr *x);
 static Node *transformXmlSerialize(ParseState *pstate, XmlSerialize *xs);
 static Node *transformBooleanTest(ParseState *pstate, BooleanTest *b);
@@ -124,6 +128,8 @@ static Node *make_row_distinct_op(ParseState *pstate, List *opname,
 					 RowExpr *lrow, RowExpr *rrow, int location);
 static Expr *make_distinct_op(ParseState *pstate, List *opname,
 				 Node *ltree, Node *rtree, int location);
+static Node *make_nulltest_from_distinct(ParseState *pstate,
+							A_Expr *distincta, Node *arg);
 static int	operator_precedence_group(Node *node, const char **nodename);
 static void emit_precedence_warnings(ParseState *pstate,
 						 int opgroup, const char *opname,
@@ -224,6 +230,7 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 						result = transformAExprOpAll(pstate, a);
 						break;
 					case AEXPR_DISTINCT:
+					case AEXPR_NOT_DISTINCT:
 						result = transformAExprDistinct(pstate, a);
 						break;
 					case AEXPR_NULLIF:
@@ -292,7 +299,7 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 			break;
 
 		case T_RowExpr:
-			result = transformRowExpr(pstate, (RowExpr *) expr);
+			result = transformRowExpr(pstate, (RowExpr *) expr, false);
 			break;
 
 		case T_CoalesceExpr:
@@ -301,6 +308,11 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 
 		case T_MinMaxExpr:
 			result = transformMinMaxExpr(pstate, (MinMaxExpr *) expr);
+			break;
+
+		case T_SQLValueFunction:
+			result = transformSQLValueFunction(pstate,
+											   (SQLValueFunction *) expr);
 			break;
 
 		case T_XmlExpr:
@@ -336,8 +348,20 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 			break;
 
 			/*
-			 * CaseTestExpr and SetToDefault don't require any processing;
-			 * they are only injected into parse trees in fully-formed state.
+			 * In all places where DEFAULT is legal, the caller should have
+			 * processed it rather than passing it to transformExpr().
+			 */
+		case T_SetToDefault:
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("DEFAULT is not allowed in this context"),
+					 parser_errposition(pstate,
+										((SetToDefault *) expr)->location)));
+			break;
+
+			/*
+			 * CaseTestExpr doesn't require any processing; it is only
+			 * injected into parse trees in a fully-formed state.
 			 *
 			 * Ordinarily we should not see a Var here, but it is convenient
 			 * for transformJoinUsingClause() to create untransformed operator
@@ -346,7 +370,6 @@ transformExprRecurse(ParseState *pstate, Node *expr)
 			 * references, which seems expensively pointless.  So allow it.
 			 */
 		case T_CaseTestExpr:
-		case T_SetToDefault:
 		case T_Var:
 			{
 				result = (Node *) expr;
@@ -554,27 +577,6 @@ transformColumnRef(ParseState *pstate, ColumnRef *cref)
 					/*
 					 * Not known as a column of any range-table entry.
 					 *
-					 * Consider the possibility that it's VALUE in a domain
-					 * check expression.  (We handle VALUE as a name, not a
-					 * keyword, to avoid breaking a lot of applications that
-					 * have used VALUE as a column name in the past.)
-					 */
-					if (pstate->p_value_substitute != NULL &&
-						strcmp(colname, "value") == 0)
-					{
-						node = (Node *) copyObject(pstate->p_value_substitute);
-
-						/*
-						 * Try to propagate location knowledge.  This should
-						 * be extended if p_value_substitute can ever take on
-						 * other node types.
-						 */
-						if (IsA(node, CoerceToDomainValue))
-							((CoerceToDomainValue *) node)->location = cref->location;
-						break;
-					}
-
-					/*
 					 * Try to find the name as a relation.  Note that only
 					 * relations already entered into the rangetable will be
 					 * recognized.
@@ -857,6 +859,14 @@ transformAExprOp(ParseState *pstate, A_Expr *a)
 			emit_precedence_warnings(pstate, opgroup, opname,
 									 lexpr, rexpr,
 									 a->location);
+
+		/* Look through AEXPR_PAREN nodes so they don't affect tests below */
+		while (lexpr && IsA(lexpr, A_Expr) &&
+			   ((A_Expr *) lexpr)->kind == AEXPR_PAREN)
+			lexpr = ((A_Expr *) lexpr)->lexpr;
+		while (rexpr && IsA(rexpr, A_Expr) &&
+			   ((A_Expr *) rexpr)->kind == AEXPR_PAREN)
+			rexpr = ((A_Expr *) rexpr)->lexpr;
 	}
 
 	/*
@@ -983,11 +993,22 @@ transformAExprDistinct(ParseState *pstate, A_Expr *a)
 {
 	Node	   *lexpr = a->lexpr;
 	Node	   *rexpr = a->rexpr;
+	Node	   *result;
 
 	if (operator_precedence_warning)
 		emit_precedence_warnings(pstate, PREC_GROUP_INFIX_IS, "IS",
 								 lexpr, rexpr,
 								 a->location);
+
+	/*
+	 * If either input is an undecorated NULL literal, transform to a NullTest
+	 * on the other input. That's simpler to process than a full DistinctExpr,
+	 * and it avoids needing to require that the datatype have an = operator.
+	 */
+	if (exprIsNullConstant(rexpr))
+		return make_nulltest_from_distinct(pstate, a, lexpr);
+	if (exprIsNullConstant(lexpr))
+		return make_nulltest_from_distinct(pstate, a, rexpr);
 
 	lexpr = transformExprRecurse(pstate, lexpr);
 	rexpr = transformExprRecurse(pstate, rexpr);
@@ -996,20 +1017,31 @@ transformAExprDistinct(ParseState *pstate, A_Expr *a)
 		rexpr && IsA(rexpr, RowExpr))
 	{
 		/* ROW() op ROW() is handled specially */
-		return make_row_distinct_op(pstate, a->name,
-									(RowExpr *) lexpr,
-									(RowExpr *) rexpr,
-									a->location);
+		result = make_row_distinct_op(pstate, a->name,
+									  (RowExpr *) lexpr,
+									  (RowExpr *) rexpr,
+									  a->location);
 	}
 	else
 	{
 		/* Ordinary scalar operator */
-		return (Node *) make_distinct_op(pstate,
-										 a->name,
-										 lexpr,
-										 rexpr,
-										 a->location);
+		result = (Node *) make_distinct_op(pstate,
+										   a->name,
+										   lexpr,
+										   rexpr,
+										   a->location);
 	}
+
+	/*
+	 * If it's NOT DISTINCT, we first build a DistinctExpr and then stick a
+	 * NOT on top.
+	 */
+	if (a->kind == AEXPR_NOT_DISTINCT)
+		result = (Node *) makeBoolExpr(NOT_EXPR,
+									   list_make1(result),
+									   a->location);
+
+	return result;
 }
 
 static Node *
@@ -1444,9 +1476,9 @@ static Node *
 transformMultiAssignRef(ParseState *pstate, MultiAssignRef *maref)
 {
 	SubLink    *sublink;
+	RowExpr    *rexpr;
 	Query	   *qtree;
 	TargetEntry *tle;
-	Param	   *param;
 
 	/* We should only see this in first-stage processing of UPDATE tlists */
 	Assert(pstate->p_expr_kind == EXPR_KIND_UPDATE_SOURCE);
@@ -1454,64 +1486,137 @@ transformMultiAssignRef(ParseState *pstate, MultiAssignRef *maref)
 	/* We only need to transform the source if this is the first column */
 	if (maref->colno == 1)
 	{
-		sublink = (SubLink *) transformExprRecurse(pstate, maref->source);
-		/* Currently, the grammar only allows a SubLink as source */
-		Assert(IsA(sublink, SubLink));
-		Assert(sublink->subLinkType == MULTIEXPR_SUBLINK);
-		qtree = (Query *) sublink->subselect;
-		Assert(IsA(qtree, Query));
+		/*
+		 * For now, we only allow EXPR SubLinks and RowExprs as the source of
+		 * an UPDATE multiassignment.  This is sufficient to cover interesting
+		 * cases; at worst, someone would have to write (SELECT * FROM expr)
+		 * to expand a composite-returning expression of another form.
+		 */
+		if (IsA(maref->source, SubLink) &&
+			((SubLink *) maref->source)->subLinkType == EXPR_SUBLINK)
+		{
+			/* Relabel it as a MULTIEXPR_SUBLINK */
+			sublink = (SubLink *) maref->source;
+			sublink->subLinkType = MULTIEXPR_SUBLINK;
+			/* And transform it */
+			sublink = (SubLink *) transformExprRecurse(pstate,
+													   (Node *) sublink);
 
-		/* Check subquery returns required number of columns */
-		if (count_nonjunk_tlist_entries(qtree->targetList) != maref->ncolumns)
-			ereport(ERROR,
-					(errcode(ERRCODE_SYNTAX_ERROR),
+			qtree = castNode(Query, sublink->subselect);
+
+			/* Check subquery returns required number of columns */
+			if (count_nonjunk_tlist_entries(qtree->targetList) != maref->ncolumns)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("number of columns does not match number of values"),
-					 parser_errposition(pstate, sublink->location)));
+						 parser_errposition(pstate, sublink->location)));
 
-		/*
-		 * Build a resjunk tlist item containing the MULTIEXPR SubLink, and
-		 * add it to pstate->p_multiassign_exprs, whence it will later get
-		 * appended to the completed targetlist.  We needn't worry about
-		 * selecting a resno for it; transformUpdateStmt will do that.
-		 */
-		tle = makeTargetEntry((Expr *) sublink, 0, NULL, true);
-		pstate->p_multiassign_exprs = lappend(pstate->p_multiassign_exprs, tle);
+			/*
+			 * Build a resjunk tlist item containing the MULTIEXPR SubLink,
+			 * and add it to pstate->p_multiassign_exprs, whence it will later
+			 * get appended to the completed targetlist.  We needn't worry
+			 * about selecting a resno for it; transformUpdateStmt will do
+			 * that.
+			 */
+			tle = makeTargetEntry((Expr *) sublink, 0, NULL, true);
+			pstate->p_multiassign_exprs = lappend(pstate->p_multiassign_exprs,
+												  tle);
 
-		/*
-		 * Assign a unique-within-this-targetlist ID to the MULTIEXPR SubLink.
-		 * We can just use its position in the p_multiassign_exprs list.
-		 */
-		sublink->subLinkId = list_length(pstate->p_multiassign_exprs);
+			/*
+			 * Assign a unique-within-this-targetlist ID to the MULTIEXPR
+			 * SubLink.  We can just use its position in the
+			 * p_multiassign_exprs list.
+			 */
+			sublink->subLinkId = list_length(pstate->p_multiassign_exprs);
+		}
+		else if (IsA(maref->source, RowExpr))
+		{
+			/* Transform the RowExpr, allowing SetToDefault items */
+			rexpr = (RowExpr *) transformRowExpr(pstate,
+												 (RowExpr *) maref->source,
+												 true);
+
+			/* Check it returns required number of columns */
+			if (list_length(rexpr->args) != maref->ncolumns)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("number of columns does not match number of values"),
+						 parser_errposition(pstate, rexpr->location)));
+
+			/*
+			 * Temporarily append it to p_multiassign_exprs, so we can get it
+			 * back when we come back here for additional columns.
+			 */
+			tle = makeTargetEntry((Expr *) rexpr, 0, NULL, true);
+			pstate->p_multiassign_exprs = lappend(pstate->p_multiassign_exprs,
+												  tle);
+		}
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("source for a multiple-column UPDATE item must be a sub-SELECT or ROW() expression"),
+				   parser_errposition(pstate, exprLocation(maref->source))));
 	}
 	else
 	{
 		/*
 		 * Second or later column in a multiassignment.  Re-fetch the
-		 * transformed query, which we assume is still the last entry in
-		 * p_multiassign_exprs.
+		 * transformed SubLink or RowExpr, which we assume is still the last
+		 * entry in p_multiassign_exprs.
 		 */
 		Assert(pstate->p_multiassign_exprs != NIL);
 		tle = (TargetEntry *) llast(pstate->p_multiassign_exprs);
-		sublink = (SubLink *) tle->expr;
-		Assert(IsA(sublink, SubLink));
-		Assert(sublink->subLinkType == MULTIEXPR_SUBLINK);
-		qtree = (Query *) sublink->subselect;
-		Assert(IsA(qtree, Query));
 	}
 
-	/* Build a Param representing the appropriate subquery output column */
-	tle = (TargetEntry *) list_nth(qtree->targetList, maref->colno - 1);
-	Assert(!tle->resjunk);
+	/*
+	 * Emit the appropriate output expression for the current column
+	 */
+	if (IsA(tle->expr, SubLink))
+	{
+		Param	   *param;
 
-	param = makeNode(Param);
-	param->paramkind = PARAM_MULTIEXPR;
-	param->paramid = (sublink->subLinkId << 16) | maref->colno;
-	param->paramtype = exprType((Node *) tle->expr);
-	param->paramtypmod = exprTypmod((Node *) tle->expr);
-	param->paramcollid = exprCollation((Node *) tle->expr);
-	param->location = exprLocation((Node *) tle->expr);
+		sublink = (SubLink *) tle->expr;
+		Assert(sublink->subLinkType == MULTIEXPR_SUBLINK);
+		qtree = castNode(Query, sublink->subselect);
 
-	return (Node *) param;
+		/* Build a Param representing the current subquery output column */
+		tle = (TargetEntry *) list_nth(qtree->targetList, maref->colno - 1);
+		Assert(!tle->resjunk);
+
+		param = makeNode(Param);
+		param->paramkind = PARAM_MULTIEXPR;
+		param->paramid = (sublink->subLinkId << 16) | maref->colno;
+		param->paramtype = exprType((Node *) tle->expr);
+		param->paramtypmod = exprTypmod((Node *) tle->expr);
+		param->paramcollid = exprCollation((Node *) tle->expr);
+		param->location = exprLocation((Node *) tle->expr);
+
+		return (Node *) param;
+	}
+
+	if (IsA(tle->expr, RowExpr))
+	{
+		Node	   *result;
+
+		rexpr = (RowExpr *) tle->expr;
+
+		/* Just extract and return the next element of the RowExpr */
+		result = (Node *) list_nth(rexpr->args, maref->colno - 1);
+
+		/*
+		 * If we're at the last column, delete the RowExpr from
+		 * p_multiassign_exprs; we don't need it anymore, and don't want it in
+		 * the finished UPDATE tlist.
+		 */
+		if (maref->colno == maref->ncolumns)
+			pstate->p_multiassign_exprs =
+				list_delete_ptr(pstate->p_multiassign_exprs, tle);
+
+		return result;
+	}
+
+	elog(ERROR, "unexpected expr type in multiassign list");
+	return NULL;				/* keep compiler quiet */
 }
 
 static Node *
@@ -1690,6 +1795,7 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
 		case EXPR_KIND_OFFSET:
 		case EXPR_KIND_RETURNING:
 		case EXPR_KIND_VALUES:
+		case EXPR_KIND_VALUES_SINGLE:
 			/* okay */
 			break;
 		case EXPR_KIND_CHECK_CONSTRAINT:
@@ -1715,6 +1821,9 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
 		case EXPR_KIND_TRIGGER_WHEN:
 			err = _("cannot use subquery in trigger WHEN condition");
 			break;
+		case EXPR_KIND_PARTITION_EXPRESSION:
+			err = _("cannot use subquery in partition key expression");
+			break;
 
 			/*
 			 * There is intentionally no default: case here, so that the
@@ -1735,15 +1844,14 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
 	/*
 	 * OK, let's transform the sub-SELECT.
 	 */
-	qtree = parse_sub_analyze(sublink->subselect, pstate, NULL, false);
+	qtree = parse_sub_analyze(sublink->subselect, pstate, NULL, false, true);
 
 	/*
-	 * Check that we got something reasonable.  Many of these conditions are
-	 * impossible given restrictions of the grammar, but check 'em anyway.
+	 * Check that we got a SELECT.  Anything else should be impossible given
+	 * restrictions of the grammar, but check anyway.
 	 */
 	if (!IsA(qtree, Query) ||
-		qtree->commandType != CMD_SELECT ||
-		qtree->utilityStmt != NULL)
+		qtree->commandType != CMD_SELECT)
 		elog(ERROR, "unexpected non-SELECT command in SubLink");
 
 	sublink->subselect = (Node *) qtree;
@@ -1903,6 +2011,11 @@ transformArrayExpr(ParseState *pstate, A_ArrayExpr *a,
 		Node	   *e = (Node *) lfirst(element);
 		Node	   *newe;
 
+		/* Look through AEXPR_PAREN nodes so they don't affect test below */
+		while (e && IsA(e, A_Expr) &&
+			   ((A_Expr *) e)->kind == AEXPR_PAREN)
+			e = ((A_Expr *) e)->lexpr;
+
 		/*
 		 * If an element is itself an A_ArrayExpr, recurse directly so that we
 		 * can pass down any target type we were given.
@@ -2034,7 +2147,7 @@ transformArrayExpr(ParseState *pstate, A_ArrayExpr *a,
 }
 
 static Node *
-transformRowExpr(ParseState *pstate, RowExpr *r)
+transformRowExpr(ParseState *pstate, RowExpr *r, bool allowDefault)
 {
 	RowExpr    *newr;
 	char		fname[16];
@@ -2044,7 +2157,8 @@ transformRowExpr(ParseState *pstate, RowExpr *r)
 	newr = makeNode(RowExpr);
 
 	/* Transform the field expressions */
-	newr->args = transformExpressionList(pstate, r->args, pstate->p_expr_kind);
+	newr->args = transformExpressionList(pstate, r->args,
+										 pstate->p_expr_kind, allowDefault);
 
 	/* Barring later casting, we consider the type RECORD */
 	newr->row_typeid = RECORDOID;
@@ -2138,6 +2252,59 @@ transformMinMaxExpr(ParseState *pstate, MinMaxExpr *m)
 	newm->args = newcoercedargs;
 	newm->location = m->location;
 	return (Node *) newm;
+}
+
+static Node *
+transformSQLValueFunction(ParseState *pstate, SQLValueFunction *svf)
+{
+	/*
+	 * All we need to do is insert the correct result type and (where needed)
+	 * validate the typmod, so we just modify the node in-place.
+	 */
+	switch (svf->op)
+	{
+		case SVFOP_CURRENT_DATE:
+			svf->type = DATEOID;
+			break;
+		case SVFOP_CURRENT_TIME:
+			svf->type = TIMETZOID;
+			break;
+		case SVFOP_CURRENT_TIME_N:
+			svf->type = TIMETZOID;
+			svf->typmod = anytime_typmod_check(true, svf->typmod);
+			break;
+		case SVFOP_CURRENT_TIMESTAMP:
+			svf->type = TIMESTAMPTZOID;
+			break;
+		case SVFOP_CURRENT_TIMESTAMP_N:
+			svf->type = TIMESTAMPTZOID;
+			svf->typmod = anytimestamp_typmod_check(true, svf->typmod);
+			break;
+		case SVFOP_LOCALTIME:
+			svf->type = TIMEOID;
+			break;
+		case SVFOP_LOCALTIME_N:
+			svf->type = TIMEOID;
+			svf->typmod = anytime_typmod_check(false, svf->typmod);
+			break;
+		case SVFOP_LOCALTIMESTAMP:
+			svf->type = TIMESTAMPOID;
+			break;
+		case SVFOP_LOCALTIMESTAMP_N:
+			svf->type = TIMESTAMPOID;
+			svf->typmod = anytimestamp_typmod_check(false, svf->typmod);
+			break;
+		case SVFOP_CURRENT_ROLE:
+		case SVFOP_CURRENT_USER:
+		case SVFOP_USER:
+		case SVFOP_SESSION_USER:
+		case SVFOP_CURRENT_CATALOG:
+		case SVFOP_CURRENT_SCHEMA:
+			svf->type = NAMEOID;
+			break;
+	}
+
+	return (Node *) svf;
 }
 
 static Node *
@@ -2453,20 +2620,31 @@ transformWholeRowRef(ParseState *pstate, RangeTblEntry *rte, int location)
 /*
  * Handle an explicit CAST construct.
  *
- * Transform the argument, then look up the type name and apply any necessary
+ * Transform the argument, look up the type name, and apply any necessary
  * coercion function(s).
  */
 static Node *
 transformTypeCast(ParseState *pstate, TypeCast *tc)
 {
 	Node	   *result;
+	Node	   *arg = tc->arg;
 	Node	   *expr;
 	Oid			inputType;
 	Oid			targetType;
 	int32		targetTypmod;
 	int			location;
 
+	/* Look up the type name first */
 	typenameTypeIdAndMod(pstate, tc->typeName, &targetType, &targetTypmod);
+
+	/*
+	 * Look through any AEXPR_PAREN nodes that may have been inserted thanks
+	 * to operator_precedence_warning.  Otherwise, ARRAY[]::foo[] behaves
+	 * differently from (ARRAY[])::foo[].
+	 */
+	while (arg && IsA(arg, A_Expr) &&
+		   ((A_Expr *) arg)->kind == AEXPR_PAREN)
+		arg = ((A_Expr *) arg)->lexpr;
 
 	/*
 	 * If the subject of the typecast is an ARRAY[] construct and the target
@@ -2475,7 +2653,7 @@ transformTypeCast(ParseState *pstate, TypeCast *tc)
 	 * transformArrayExpr() might not infer the correct type.  Otherwise, just
 	 * transform the argument normally.
 	 */
-	if (IsA(tc->arg, A_ArrayExpr))
+	if (IsA(arg, A_ArrayExpr))
 	{
 		Oid			targetBaseType;
 		int32		targetBaseTypmod;
@@ -2493,16 +2671,16 @@ transformTypeCast(ParseState *pstate, TypeCast *tc)
 		if (OidIsValid(elementType))
 		{
 			expr = transformArrayExpr(pstate,
-									  (A_ArrayExpr *) tc->arg,
+									  (A_ArrayExpr *) arg,
 									  targetBaseType,
 									  elementType,
 									  targetBaseTypmod);
 		}
 		else
-			expr = transformExprRecurse(pstate, tc->arg);
+			expr = transformExprRecurse(pstate, arg);
 	}
 	else
-		expr = transformExprRecurse(pstate, tc->arg);
+		expr = transformExprRecurse(pstate, arg);
 
 	inputType = exprType(expr);
 	if (inputType == InvalidOid)
@@ -2846,6 +3024,28 @@ make_distinct_op(ParseState *pstate, List *opname, Node *ltree, Node *rtree,
 }
 
 /*
+ * Produce a NullTest node from an IS [NOT] DISTINCT FROM NULL construct
+ *
+ * "arg" is the untransformed other argument
+ */
+static Node *
+make_nulltest_from_distinct(ParseState *pstate, A_Expr *distincta, Node *arg)
+{
+	NullTest   *nt = makeNode(NullTest);
+
+	nt->arg = (Expr *) transformExprRecurse(pstate, arg);
+	/* the argument can be any type, so don't coerce it */
+	if (distincta->kind == AEXPR_NOT_DISTINCT)
+		nt->nulltesttype = IS_NULL;
+	else
+		nt->nulltesttype = IS_NOT_NULL;
+	/* argisrow = false is correct whether or not arg is composite */
+	nt->argisrow = false;
+	nt->location = distincta->location;
+	return (Node *) nt;
+}
+
+/*
  * Identify node's group for operator precedence warnings
  *
  * For items in nonzero groups, also return a suitable node name into *nodename
@@ -2947,7 +3147,8 @@ operator_precedence_group(Node *node, const char **nodename)
 			*nodename = strVal(llast(aexpr->name));
 			group = PREC_GROUP_POSTFIX_OP;
 		}
-		else if (aexpr->kind == AEXPR_DISTINCT)
+		else if (aexpr->kind == AEXPR_DISTINCT ||
+				 aexpr->kind == AEXPR_NOT_DISTINCT)
 		{
 			*nodename = "IS";
 			group = PREC_GROUP_INFIX_IS;
@@ -3208,6 +3409,7 @@ ParseExprKindName(ParseExprKind exprKind)
 		case EXPR_KIND_RETURNING:
 			return "RETURNING";
 		case EXPR_KIND_VALUES:
+		case EXPR_KIND_VALUES_SINGLE:
 			return "VALUES";
 		case EXPR_KIND_CHECK_CONSTRAINT:
 		case EXPR_KIND_DOMAIN_CHECK:
@@ -3225,6 +3427,8 @@ ParseExprKindName(ParseExprKind exprKind)
 			return "EXECUTE";
 		case EXPR_KIND_TRIGGER_WHEN:
 			return "WHEN";
+		case EXPR_KIND_PARTITION_EXPRESSION:
+			return "PARTITION BY";
 
 			/*
 			 * There is intentionally no default: case here, so that the

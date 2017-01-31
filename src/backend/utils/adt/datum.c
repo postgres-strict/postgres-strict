@@ -3,7 +3,7 @@
  * datum.c
  *	  POSTGRES Datum (abstract data type) manipulation routines.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -209,6 +209,10 @@ datumTransfer(Datum value, bool typByVal, int typLen)
  * of say the representation of zero in one's complement arithmetic).
  * Also, it will probably not give the answer you want if either
  * datum has been "toasted".
+ *
+ * Do not try to make this any smarter than it currently is with respect
+ * to "toasted" datums, because some of the callers could be working in the
+ * context of an aborted transaction.
  *-------------------------------------------------------------------------
  */
 bool
@@ -257,7 +261,7 @@ datumIsEqual(Datum value1, Datum value2, bool typByVal, int typLen)
 Size
 datumEstimateSpace(Datum value, bool isnull, bool typByVal, int typLen)
 {
-	Size	sz = sizeof(int);
+	Size		sz = sizeof(int);
 
 	if (!isnull)
 	{
@@ -267,6 +271,7 @@ datumEstimateSpace(Datum value, bool isnull, bool typByVal, int typLen)
 		else if (VARATT_IS_EXTERNAL_EXPANDED(value))
 		{
 			ExpandedObjectHeader *eoh = DatumGetEOHP(value);
+
 			sz += EOH_get_flat_size(eoh);
 		}
 		else
@@ -298,7 +303,7 @@ datumSerialize(Datum value, bool isnull, bool typByVal, int typLen,
 			   char **start_address)
 {
 	ExpandedObjectHeader *eoh = NULL;
-	int		header;
+	int			header;
 
 	/* Write header word. */
 	if (isnull)
@@ -346,8 +351,8 @@ datumSerialize(Datum value, bool isnull, bool typByVal, int typLen,
 Datum
 datumRestore(char **start_address, bool *isnull)
 {
-	int		header;
-	void   *d;
+	int			header;
+	void	   *d;
 
 	/* Read header word. */
 	memcpy(&header, *start_address, sizeof(int));

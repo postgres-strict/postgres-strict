@@ -4,7 +4,8 @@
 #define _ECPG_PREPROC_EXTERN_H
 
 #include "type.h"
-#include "parser/keywords.h"
+
+#include "common/keywords.h"
 
 #include <errno.h>
 #ifndef CHAR_BIT
@@ -34,15 +35,15 @@ extern char *descriptor_index;
 extern char *descriptor_name;
 extern char *connection;
 extern char *input_filename;
-extern char *yytext,
+extern char *base_yytext,
 		   *token_start;
 
 #ifdef YYDEBUG
-extern int	yydebug;
+extern int	base_yydebug;
 #endif
-extern int	yylineno;
-extern FILE *yyin,
-		   *yyout;
+extern int	base_yylineno;
+extern FILE *base_yyin,
+		   *base_yyout;
 extern char *output_filename;
 
 extern struct _include_path *include_paths;

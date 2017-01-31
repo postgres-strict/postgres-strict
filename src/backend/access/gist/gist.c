@@ -4,7 +4,7 @@
  *	  interface routines for the postgres GiST index access method.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -18,6 +18,7 @@
 #include "access/gistscan.h"
 #include "catalog/pg_collation.h"
 #include "miscadmin.h"
+#include "utils/builtins.h"
 #include "utils/index_selfuncs.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -57,7 +58,7 @@ gisthandler(PG_FUNCTION_ARGS)
 	IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
 
 	amroutine->amstrategies = 0;
-	amroutine->amsupport = 9;
+	amroutine->amsupport = GISTNProcs;
 	amroutine->amcanorder = false;
 	amroutine->amcanorderbyop = true;
 	amroutine->amcanbackward = false;
@@ -79,6 +80,7 @@ gisthandler(PG_FUNCTION_ARGS)
 	amroutine->amcanreturn = gistcanreturn;
 	amroutine->amcostestimate = gistcostestimate;
 	amroutine->amoptions = gistoptions;
+	amroutine->amproperty = gistproperty;
 	amroutine->amvalidate = gistvalidate;
 	amroutine->ambeginscan = gistbeginscan;
 	amroutine->amrescan = gistrescan;
@@ -87,6 +89,9 @@ gisthandler(PG_FUNCTION_ARGS)
 	amroutine->amendscan = gistendscan;
 	amroutine->ammarkpos = NULL;
 	amroutine->amrestrpos = NULL;
+	amroutine->amestimateparallelscan = NULL;
+	amroutine->aminitparallelscan = NULL;
+	amroutine->amparallelrescan = NULL;
 
 	PG_RETURN_POINTER(amroutine);
 }
@@ -104,9 +109,7 @@ createTempGistContext(void)
 {
 	return AllocSetContextCreate(CurrentMemoryContext,
 								 "GiST temporary context",
-								 ALLOCSET_DEFAULT_MINSIZE,
-								 ALLOCSET_DEFAULT_INITSIZE,
-								 ALLOCSET_DEFAULT_MAXSIZE);
+								 ALLOCSET_DEFAULT_SIZES);
 }
 
 /*
@@ -467,7 +470,7 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 
 		/* Write the WAL record */
 		if (RelationNeedsWAL(rel))
-			recptr = gistXLogSplit(rel->rd_node, blkno, is_leaf,
+			recptr = gistXLogSplit(is_leaf,
 								   dist, oldrlink, oldnsn, leftchildbuf,
 								   markfollowright);
 		else
@@ -494,18 +497,36 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 	else
 	{
 		/*
-		 * Enough space. We also get here if ntuples==0.
+		 * Enough space.  We always get here if ntup==0.
 		 */
 		START_CRIT_SECTION();
 
 		/*
-		 * While we delete only one tuple at once we could mix calls
-		 * PageIndexTupleDelete() here and PageIndexMultiDelete() in
-		 * gistRedoPageUpdateRecord()
+		 * Delete old tuple if any, then insert new tuple(s) if any.  If
+		 * possible, use the fast path of PageIndexTupleOverwrite.
 		 */
 		if (OffsetNumberIsValid(oldoffnum))
-			PageIndexTupleDelete(page, oldoffnum);
-		gistfillbuffer(page, itup, ntup, InvalidOffsetNumber);
+		{
+			if (ntup == 1)
+			{
+				/* One-for-one replacement, so use PageIndexTupleOverwrite */
+				if (!PageIndexTupleOverwrite(page, oldoffnum, (Item) *itup,
+											 IndexTupleSize(*itup)))
+					elog(ERROR, "failed to add item to index page in \"%s\"",
+						 RelationGetRelationName(rel));
+			}
+			else
+			{
+				/* Delete old, then append new tuple(s) to page */
+				PageIndexTupleDelete(page, oldoffnum);
+				gistfillbuffer(page, itup, ntup, InvalidOffsetNumber);
+			}
+		}
+		else
+		{
+			/* Just append new tuples at the end of the page */
+			gistfillbuffer(page, itup, ntup, InvalidOffsetNumber);
+		}
 
 		MarkBufferDirty(buffer);
 
@@ -523,7 +544,7 @@ gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 				ndeloffs = 1;
 			}
 
-			recptr = gistXLogUpdate(rel->rd_node, buffer,
+			recptr = gistXLogUpdate(buffer,
 									deloffs, ndeloffs, itup, ntup,
 									leftchildbuf);
 
@@ -1410,9 +1431,7 @@ initGISTstate(Relation index)
 	/* Create the memory context that will hold the GISTSTATE */
 	scanCxt = AllocSetContextCreate(CurrentMemoryContext,
 									"GiST scan context",
-									ALLOCSET_DEFAULT_MINSIZE,
-									ALLOCSET_DEFAULT_INITSIZE,
-									ALLOCSET_DEFAULT_MAXSIZE);
+									ALLOCSET_DEFAULT_SIZES);
 	oldCxt = MemoryContextSwitchTo(scanCxt);
 
 	/* Create and fill in the GISTSTATE */
@@ -1498,8 +1517,9 @@ static void
 gistvacuumpage(Relation rel, Page page, Buffer buffer)
 {
 	OffsetNumber deletable[MaxIndexTuplesPerPage];
-	int			 ndeletable = 0;
-	OffsetNumber offnum, maxoff;
+	int			ndeletable = 0;
+	OffsetNumber offnum,
+				maxoff;
 
 	Assert(GistPageIsLeaf(page));
 
@@ -1540,7 +1560,7 @@ gistvacuumpage(Relation rel, Page page, Buffer buffer)
 		{
 			XLogRecPtr	recptr;
 
-			recptr = gistXLogUpdate(rel->rd_node, buffer,
+			recptr = gistXLogUpdate(buffer,
 									deletable, ndeletable,
 									NULL, 0, InvalidBuffer);
 

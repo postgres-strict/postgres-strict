@@ -4,7 +4,7 @@
  *	  Public header file for SP-GiST access method.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/spgist.h
@@ -90,10 +90,13 @@ typedef struct spgChooseOut
 		}			addNode;
 		struct					/* results for spgSplitTuple */
 		{
-			/* Info to form new inner tuple with one node */
+			/* Info to form new upper-level inner tuple with one child tuple */
 			bool		prefixHasPrefix;		/* tuple should have a prefix? */
 			Datum		prefixPrefixDatum;		/* if so, its value */
-			Datum		nodeLabel;		/* node's label */
+			int			prefixNNodes;	/* number of nodes */
+			Datum	   *prefixNodeLabels;		/* their labels (or NULL for
+												 * no labels) */
+			int			childNodeN;		/* which node gets child tuple */
 
 			/* Info to form new lower-level inner tuple with all old nodes */
 			bool		postfixHasPrefix;		/* tuple should have a prefix? */
@@ -133,6 +136,9 @@ typedef struct spgInnerConsistentIn
 	int			nkeys;			/* length of array */
 
 	Datum		reconstructedValue;		/* value reconstructed at parent */
+	void	   *traversalValue; /* opclass-specific traverse value */
+	MemoryContext traversalMemoryContext;		/* put new traverse values
+												 * here */
 	int			level;			/* current level (counting from zero) */
 	bool		returnData;		/* original data must be returned? */
 
@@ -150,6 +156,7 @@ typedef struct spgInnerConsistentOut
 	int		   *nodeNumbers;	/* their indexes in the node array */
 	int		   *levelAdds;		/* increment level by this much for each */
 	Datum	   *reconstructedValues;	/* associated reconstructed values */
+	void	  **traversalValues;	/* opclass-specific traverse values */
 } spgInnerConsistentOut;
 
 /*
@@ -161,6 +168,7 @@ typedef struct spgLeafConsistentIn
 	int			nkeys;			/* length of array */
 
 	Datum		reconstructedValue;		/* value reconstructed at parent */
+	void	   *traversalValue; /* opclass-specific traverse value */
 	int			level;			/* current level (counting from zero) */
 	bool		returnData;		/* original data must be returned? */
 
@@ -175,7 +183,6 @@ typedef struct spgLeafConsistentOut
 
 
 /* spgutils.c */
-extern Datum spghandler(PG_FUNCTION_ARGS);
 extern bytea *spgoptions(Datum reloptions, bool validate);
 
 /* spginsert.c */

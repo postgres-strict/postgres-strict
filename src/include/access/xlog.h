@@ -3,7 +3,7 @@
  *
  * PostgreSQL transaction log manager
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/xlog.h
@@ -83,6 +83,7 @@ typedef enum
 	RECOVERY_TARGET_XID,
 	RECOVERY_TARGET_TIME,
 	RECOVERY_TARGET_NAME,
+	RECOVERY_TARGET_LSN,
 	RECOVERY_TARGET_IMMEDIATE
 } RecoveryTargetType;
 
@@ -121,25 +122,25 @@ extern int	XLogArchiveMode;
 typedef enum WalLevel
 {
 	WAL_LEVEL_MINIMAL = 0,
-	WAL_LEVEL_ARCHIVE,
-	WAL_LEVEL_HOT_STANDBY,
+	WAL_LEVEL_REPLICA,
 	WAL_LEVEL_LOGICAL
 } WalLevel;
-extern int	wal_level;
+
+extern PGDLLIMPORT int wal_level;
 
 /* Is WAL archiving enabled (always or only while server is running normally)? */
 #define XLogArchivingActive() \
-	(XLogArchiveMode > ARCHIVE_MODE_OFF && wal_level >= WAL_LEVEL_ARCHIVE)
+	(AssertMacro(XLogArchiveMode == ARCHIVE_MODE_OFF || wal_level >= WAL_LEVEL_REPLICA), XLogArchiveMode > ARCHIVE_MODE_OFF)
 /* Is WAL archiving enabled always (even during recovery)? */
 #define XLogArchivingAlways() \
-	(XLogArchiveMode == ARCHIVE_MODE_ALWAYS && wal_level >= WAL_LEVEL_ARCHIVE)
+	(AssertMacro(XLogArchiveMode == ARCHIVE_MODE_OFF || wal_level >= WAL_LEVEL_REPLICA), XLogArchiveMode == ARCHIVE_MODE_ALWAYS)
 #define XLogArchiveCommandSet() (XLogArchiveCommand[0] != '\0')
 
 /*
  * Is WAL-logging necessary for archival or log-shipping, or can we skip
  * WAL-logging if we fsync() the data before committing instead?
  */
-#define XLogIsNeeded() (wal_level >= WAL_LEVEL_ARCHIVE)
+#define XLogIsNeeded() (wal_level >= WAL_LEVEL_REPLICA)
 
 /*
  * Is a full-page image needed for hint bit updates?
@@ -153,7 +154,7 @@ extern int	wal_level;
 #define XLogHintBitIsNeeded() (DataChecksumsEnabled() || wal_log_hints)
 
 /* Do we need to WAL-log information required only for Hot Standby and logical replication? */
-#define XLogStandbyInfoActive() (wal_level >= WAL_LEVEL_HOT_STANDBY)
+#define XLogStandbyInfoActive() (wal_level >= WAL_LEVEL_REPLICA)
 
 /* Do we need to WAL-log information required only for logical replication? */
 #define XLogLogicalInfoActive() (wal_level >= WAL_LEVEL_LOGICAL)
@@ -183,6 +184,13 @@ extern bool XLOG_DEBUG;
 #define CHECKPOINT_CAUSE_XLOG	0x0040	/* XLOG consumption */
 #define CHECKPOINT_CAUSE_TIME	0x0080	/* Elapsed time */
 
+/*
+ * Flag bits for the record being inserted, set using XLogSetRecordFlags().
+ */
+#define XLOG_INCLUDE_ORIGIN		0x01	/* include the replication origin */
+#define XLOG_MARK_UNIMPORTANT	0x02	/* record not important for durability */
+
+
 /* Checkpoint statistics */
 typedef struct CheckpointStatsData
 {
@@ -210,7 +218,9 @@ extern CheckpointStatsData CheckpointStats;
 
 struct XLogRecData;
 
-extern XLogRecPtr XLogInsertRecord(struct XLogRecData *rdata, XLogRecPtr fpw_lsn);
+extern XLogRecPtr XLogInsertRecord(struct XLogRecData *rdata,
+								   XLogRecPtr fpw_lsn,
+								   uint8 flags);
 extern void XLogFlush(XLogRecPtr RecPtr);
 extern bool XLogBackgroundFlush(void);
 extern bool XLogNeedsFlush(XLogRecPtr RecPtr);
@@ -261,12 +271,15 @@ extern void GetFullPageWriteInfo(XLogRecPtr *RedoRecPtr_p, bool *doPageWrites_p)
 extern XLogRecPtr GetRedoRecPtr(void);
 extern XLogRecPtr GetInsertRecPtr(void);
 extern XLogRecPtr GetFlushRecPtr(void);
+extern XLogRecPtr GetLastImportantRecPtr(void);
 extern void GetNextXidAndEpoch(TransactionId *xid, uint32 *epoch);
 extern void RemovePromoteSignalFiles(void);
 
 extern bool CheckPromoteSignal(void);
 extern void WakeupRecovery(void);
 extern void SetWalWriterSleeping(bool sleeping);
+
+extern void XLogRequestWalReceiverReply(void);
 
 extern void assign_max_wal_size(int newval, void *extra);
 extern void assign_checkpoint_completion_target(double newval, void *extra);
@@ -275,8 +288,8 @@ extern void assign_checkpoint_completion_target(double newval, void *extra);
  * Starting/stopping a base backup
  */
 extern XLogRecPtr do_pg_start_backup(const char *backupidstr, bool fast,
-				   TimeLineID *starttli_p, char **labelfile, DIR *tblspcdir,
-				   List **tablespaces, char **tblspcmapfile, bool infotbssize,
+				TimeLineID *starttli_p, StringInfo labelfile, DIR *tblspcdir,
+			  List **tablespaces, StringInfo tblspcmapfile, bool infotbssize,
 				   bool needtblspcmapfile);
 extern XLogRecPtr do_pg_stop_backup(char *labelfile, bool waitforarchive,
 				  TimeLineID *stoptli_p);

@@ -33,6 +33,7 @@
 #include "pg_backup_tar.h"
 #include "pg_backup_utils.h"
 #include "pgtar.h"
+#include "fe_utils/string_utils.h"
 
 #include <sys/stat.h>
 #include <ctype.h>
@@ -150,9 +151,6 @@ InitArchiveFmt_Tar(ArchiveHandle *AH)
 	AH->EndBlobsPtr = _EndBlobs;
 	AH->ClonePtr = NULL;
 	AH->DeClonePtr = NULL;
-
-	AH->MasterStartParallelItemPtr = NULL;
-	AH->MasterEndParallelItemPtr = NULL;
 
 	AH->WorkerJobDumpPtr = NULL;
 	AH->WorkerJobRestorePtr = NULL;

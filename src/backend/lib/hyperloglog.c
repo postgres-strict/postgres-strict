@@ -3,7 +3,7 @@
  * hyperloglog.c
  *	  HyperLogLog cardinality estimator
  *
- * Portions Copyright (c) 2014-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2014-2017, PostgreSQL Global Development Group
  *
  * Based on Hideaki Ohno's C++ implementation.  This is probably not ideally
  * suited to estimating the cardinality of very large sets;  in particular, we
@@ -219,28 +219,6 @@ estimateHyperLogLog(hyperLogLogState *cState)
 
 	return result;
 }
-
-/*
- * Merges the estimate from one HyperLogLog state to another, returning the
- * estimate of their union.
- *
- * The number of registers in each must match.
- */
-void
-mergeHyperLogLog(hyperLogLogState *cState, const hyperLogLogState *oState)
-{
-	int			r;
-
-	if (cState->nRegisters != oState->nRegisters)
-		elog(ERROR, "number of registers mismatch: %zu != %zu",
-			 cState->nRegisters, oState->nRegisters);
-
-	for (r = 0; r < cState->nRegisters; ++r)
-	{
-		cState->hashesArr[r] = Max(cState->hashesArr[r], oState->hashesArr[r]);
-	}
-}
-
 
 /*
  * Worker for addHyperLogLog().

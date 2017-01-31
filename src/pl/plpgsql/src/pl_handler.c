@@ -3,7 +3,7 @@
  * pl_handler.c		- Handler for the PL/pgSQL
  *			  procedural language
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -24,6 +24,7 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
+#include "utils/varlena.h"
 
 
 static bool plpgsql_extra_checks_check_hook(char **newvalue, void **extra, GucSource source);
@@ -52,7 +53,7 @@ int			plpgsql_extra_warnings;
 int			plpgsql_extra_errors;
 
 /* Hook for plugins */
-PLpgSQL_plugin **plugin_ptr = NULL;
+PLpgSQL_plugin **plpgsql_plugin_ptr = NULL;
 
 
 static bool
@@ -110,6 +111,8 @@ plpgsql_extra_checks_check_hook(char **newvalue, void **extra, GucSource source)
 	}
 
 	myextra = (int *) malloc(sizeof(int));
+	if (!myextra)
+		return false;
 	*myextra = extrachecks;
 	*extra = (void *) myextra;
 
@@ -197,7 +200,7 @@ _PG_init(void)
 	RegisterSubXactCallback(plpgsql_subxact_cb, NULL);
 
 	/* Set up a rendezvous point with optional instrumentation plugin */
-	plugin_ptr = (PLpgSQL_plugin **) find_rendezvous_variable("PLpgSQL_plugin");
+	plpgsql_plugin_ptr = (PLpgSQL_plugin **) find_rendezvous_variable("PLpgSQL_plugin");
 
 	inited = true;
 }

@@ -3,7 +3,7 @@
  * nodeForeignscan.c
  *	  Routines to support scans of foreign tables
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -48,7 +48,10 @@ ForeignNext(ForeignScanState *node)
 
 	/* Call the Iterate function in short-lived context */
 	oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
-	slot = node->fdwroutine->IterateForeignScan(node);
+	if (plan->operation != CMD_SELECT)
+		slot = node->fdwroutine->IterateDirectModify(node);
+	else
+		slot = node->fdwroutine->IterateForeignScan(node);
 	MemoryContextSwitchTo(oldcontext);
 
 	/*
@@ -149,8 +152,6 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 	 */
 	ExecAssignExprContext(estate, &scanstate->ss.ps);
 
-	scanstate->ss.ps.ps_TupFromTlist = false;
-
 	/*
 	 * initialize child expressions
 	 */
@@ -226,7 +227,10 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 	/*
 	 * Tell the FDW to initialize the scan.
 	 */
-	fdwroutine->BeginForeignScan(scanstate, eflags);
+	if (node->operation != CMD_SELECT)
+		fdwroutine->BeginDirectModify(scanstate, eflags);
+	else
+		fdwroutine->BeginForeignScan(scanstate, eflags);
 
 	return scanstate;
 }
@@ -240,8 +244,13 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 void
 ExecEndForeignScan(ForeignScanState *node)
 {
+	ForeignScan *plan = (ForeignScan *) node->ss.ps.plan;
+
 	/* Let the FDW shut down */
-	node->fdwroutine->EndForeignScan(node);
+	if (plan->operation != CMD_SELECT)
+		node->fdwroutine->EndDirectModify(node);
+	else
+		node->fdwroutine->EndForeignScan(node);
 
 	/* Shut down any outer plan. */
 	if (outerPlanState(node))
@@ -274,8 +283,8 @@ ExecReScanForeignScan(ForeignScanState *node)
 
 	/*
 	 * If chgParam of subnode is not null then plan will be re-scanned by
-	 * first ExecProcNode.  outerPlan may also be NULL, in which case there
-	 * is nothing to rescan at all.
+	 * first ExecProcNode.  outerPlan may also be NULL, in which case there is
+	 * nothing to rescan at all.
 	 */
 	if (outerPlan != NULL && outerPlan->chgParam == NULL)
 		ExecReScan(outerPlan);

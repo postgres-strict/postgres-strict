@@ -3,7 +3,7 @@
  *
  * pl_gram.y			- Parser for the PL/pgSQL procedural language
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -180,10 +180,11 @@ static	void			check_raise_parameters(PLpgSQL_stmt_raise *stmt);
 %type <expr>	expr_until_then expr_until_loop opt_expr_until_when
 %type <expr>	opt_exitcond
 
-%type <ival>	assign_var foreach_slice
+%type <datum>	assign_var
 %type <var>		cursor_variable
 %type <datum>	decl_cursor_arg
 %type <forvariable>	for_variable
+%type <ival>	foreach_slice
 %type <stmt>	for_control
 
 %type <str>		any_identifier opt_block_label opt_loop_label opt_label
@@ -209,7 +210,8 @@ static	void			check_raise_parameters(PLpgSQL_stmt_raise *stmt);
 %type <boolean>	getdiag_area_opt
 %type <list>	getdiag_list
 %type <diagitem> getdiag_list_item
-%type <ival>	getdiag_item getdiag_target
+%type <datum>	getdiag_target
+%type <ival>	getdiag_item
 
 %type <ival>	opt_scrollable
 %type <fetch>	opt_fetch_direction
@@ -287,6 +289,7 @@ static	void			check_raise_parameters(PLpgSQL_stmt_raise *stmt);
 %token <keyword>	K_GET
 %token <keyword>	K_HINT
 %token <keyword>	K_IF
+%token <keyword>	K_IMPORT
 %token <keyword>	K_IN
 %token <keyword>	K_INFO
 %token <keyword>	K_INSERT
@@ -915,7 +918,7 @@ stmt_assign		: assign_var assign_operator expr_until_semi
 						new = palloc0(sizeof(PLpgSQL_stmt_assign));
 						new->cmd_type = PLPGSQL_STMT_ASSIGN;
 						new->lineno   = plpgsql_location_to_lineno(@1);
-						new->varno = $1;
+						new->varno = $1->dno;
 						new->expr  = $3;
 
 						$$ = (PLpgSQL_stmt *)new;
@@ -1013,7 +1016,7 @@ getdiag_list_item : getdiag_target assign_operator getdiag_item
 						PLpgSQL_diag_item *new;
 
 						new = palloc(sizeof(PLpgSQL_diag_item));
-						new->target = $1;
+						new->target = $1->dno;
 						new->kind = $3;
 
 						$$ = new;
@@ -1068,17 +1071,16 @@ getdiag_item :
 					}
 				;
 
-getdiag_target	: T_DATUM
+getdiag_target	: assign_var
 					{
-						check_assignable($1.datum, @1);
-						if ($1.datum->dtype == PLPGSQL_DTYPE_ROW ||
-							$1.datum->dtype == PLPGSQL_DTYPE_REC)
+						if ($1->dtype == PLPGSQL_DTYPE_ROW ||
+							$1->dtype == PLPGSQL_DTYPE_REC)
 							ereport(ERROR,
 									(errcode(ERRCODE_SYNTAX_ERROR),
 									 errmsg("\"%s\" is not a scalar variable",
-											NameOfDatum(&($1))),
+											((PLpgSQL_variable *) $1)->refname),
 									 parser_errposition(@1)));
-						$$ = $1.datum->dno;
+						$$ = $1;
 					}
 				| T_WORD
 					{
@@ -1096,7 +1098,7 @@ getdiag_target	: T_DATUM
 assign_var		: T_DATUM
 					{
 						check_assignable($1.datum, @1);
-						$$ = $1.datum->dno;
+						$$ = $1.datum;
 					}
 				| assign_var '[' expr_until_rightbracket
 					{
@@ -1105,13 +1107,13 @@ assign_var		: T_DATUM
 						new = palloc0(sizeof(PLpgSQL_arrayelem));
 						new->dtype		= PLPGSQL_DTYPE_ARRAYELEM;
 						new->subscript	= $3;
-						new->arrayparentno = $1;
+						new->arrayparentno = $1->dno;
 						/* initialize cached type data to "not valid" */
 						new->parenttypoid = InvalidOid;
 
 						plpgsql_adddatum((PLpgSQL_datum *) new);
 
-						$$ = new->dno;
+						$$ = (PLpgSQL_datum *) new;
 					}
 				;
 
@@ -1929,7 +1931,11 @@ loop_body		: proc_sect K_END K_LOOP opt_label ';'
  * assignment.  Give an appropriate complaint for that, instead of letting
  * the core parser throw an unhelpful "syntax error".
  */
-stmt_execsql	: K_INSERT
+stmt_execsql	: K_IMPORT
+					{
+						$$ = make_execsql_stmt(K_IMPORT, @1);
+					}
+				| K_INSERT
 					{
 						$$ = make_execsql_stmt(K_INSERT, @1);
 					}
@@ -2168,7 +2174,13 @@ stmt_null		: K_NULL ';'
 
 cursor_variable	: T_DATUM
 					{
-						if ($1.datum->dtype != PLPGSQL_DTYPE_VAR)
+						/*
+						 * In principle we should support a cursor_variable
+						 * that is an array element, but for now we don't, so
+						 * just throw an error if next token is '['.
+						 */
+						if ($1.datum->dtype != PLPGSQL_DTYPE_VAR ||
+							plpgsql_peek() == '[')
 							ereport(ERROR,
 									(errcode(ERRCODE_DATATYPE_MISMATCH),
 									 errmsg("cursor variable must be a simple variable"),
@@ -2418,6 +2430,7 @@ unreserved_keyword	:
 				| K_FORWARD
 				| K_GET
 				| K_HINT
+				| K_IMPORT
 				| K_INFO
 				| K_INSERT
 				| K_IS
@@ -2843,12 +2856,32 @@ make_execsql_stmt(int firsttoken, int location)
 	plpgsql_IdentifierLookup = IDENTIFIER_LOOKUP_EXPR;
 
 	/*
-	 * We have to special-case the sequence INSERT INTO, because we don't want
-	 * that to be taken as an INTO-variables clause.  Fortunately, this is the
-	 * only valid use of INTO in a pl/pgsql SQL command, and INTO is already a
-	 * fully reserved word in the main grammar.  We have to treat it that way
-	 * anywhere in the string, not only at the start; consider CREATE RULE
-	 * containing an INSERT statement.
+	 * Scan to the end of the SQL command.  Identify any INTO-variables
+	 * clause lurking within it, and parse that via read_into_target().
+	 *
+	 * Because INTO is sometimes used in the main SQL grammar, we have to be
+	 * careful not to take any such usage of INTO as a pl/pgsql INTO clause.
+	 * There are currently three such cases:
+	 *
+	 * 1. SELECT ... INTO.  We don't care, we just override that with the
+	 * pl/pgsql definition.
+	 *
+	 * 2. INSERT INTO.  This is relatively easy to recognize since the words
+	 * must appear adjacently; but we can't assume INSERT starts the command,
+	 * because it can appear in CREATE RULE or WITH.  Unfortunately, INSERT is
+	 * *not* fully reserved, so that means there is a chance of a false match;
+	 * but it's not very likely.
+	 *
+	 * 3. IMPORT FOREIGN SCHEMA ... INTO.  This is not allowed in CREATE RULE
+	 * or WITH, so we just check for IMPORT as the command's first token.
+	 * (If IMPORT FOREIGN SCHEMA returned data someone might wish to capture
+	 * with an INTO-variables clause, we'd have to work much harder here.)
+	 *
+	 * Fortunately, INTO is a fully reserved word in the main grammar, so
+	 * at least we need not worry about it appearing as an identifier.
+	 *
+	 * Any future additional uses of INTO in the main grammar will doubtless
+	 * break this logic again ... beware!
 	 */
 	tok = firsttoken;
 	for (;;)
@@ -2861,9 +2894,12 @@ make_execsql_stmt(int firsttoken, int location)
 			break;
 		if (tok == 0)
 			yyerror("unexpected end of function definition");
-
-		if (tok == K_INTO && prev_tok != K_INSERT)
+		if (tok == K_INTO)
 		{
+			if (prev_tok == K_INSERT)
+				continue;		/* INSERT INTO is not an INTO-target */
+			if (firsttoken == K_IMPORT)
+				continue;		/* IMPORT ... INTO is not an INTO-target */
 			if (have_into)
 				yyerror("INTO specified more than once");
 			have_into = true;
@@ -3518,7 +3554,7 @@ check_sql_expr(const char *stmt, int location, int leaderlen)
 	syntax_errcontext.previous = error_context_stack;
 	error_context_stack = &syntax_errcontext;
 
-	oldCxt = MemoryContextSwitchTo(compile_tmp_cxt);
+	oldCxt = MemoryContextSwitchTo(plpgsql_compile_tmp_cxt);
 	(void) raw_parser(stmt);
 	MemoryContextSwitchTo(oldCxt);
 

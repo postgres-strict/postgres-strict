@@ -23,6 +23,8 @@ PostgreSQL documentation
 <synopsis>
 ALTER MATERIALIZED VIEW [ IF EXISTS ] <replaceable class="PARAMETER">name</replaceable>
     <replaceable class="PARAMETER">action</replaceable> [, ... ]
+ALTER MATERIALIZED VIEW <replaceable class="PARAMETER">name</replaceable>
+    DEPENDS ON EXTENSION <replaceable class="PARAMETER">extension_name</replaceable>
 ALTER MATERIALIZED VIEW [ IF EXISTS ] <replaceable class="PARAMETER">name</replaceable>
     RENAME [ COLUMN ] <replaceable class="PARAMETER">column_name</replaceable> TO <replaceable class="PARAMETER">new_column_name</replaceable>
 ALTER MATERIALIZED VIEW [ IF EXISTS ] <replaceable class="parameter">name</replaceable>
@@ -43,7 +45,6 @@ ALTER MATERIALIZED VIEW ALL IN TABLESPACE <replaceable class="parameter">name</r
     SET ( <replaceable class="PARAMETER">storage_parameter</replaceable> = <replaceable class="PARAMETER">value</replaceable> [, ... ] )
     RESET ( <replaceable class="PARAMETER">storage_parameter</replaceable> [, ... ] )
     OWNER TO { <replaceable class="PARAMETER">new_owner</replaceable> | CURRENT_USER | SESSION_USER }
-    SET TABLESPACE <replaceable class="PARAMETER">new_tablespace</replaceable>
 </synopsis>
  </refsynopsisdiv>
 
@@ -65,6 +66,12 @@ ALTER MATERIALIZED VIEW ALL IN TABLESPACE <replaceable class="parameter">name</r
    the owner doesn't do anything you couldn't do by dropping and recreating the
    materialized view.  However, a superuser can alter ownership of any view
    anyway.)
+  </para>
+
+  <para>
+   The <literal>DEPENDS ON EXTENSION</literal> form marks the materialized view
+   as dependent on an extension, such that the materialized view will
+   automatically be dropped if the extension is dropped.
   </para>
 
   <para>
@@ -95,6 +102,15 @@ ALTER MATERIALIZED VIEW ALL IN TABLESPACE <replaceable class="parameter">name</r
      <listitem>
       <para>
        Name of a new or existing column.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><replaceable class="PARAMETER">extension_name</replaceable></term>
+     <listitem>
+      <para>
+       The name of the extension that the materialized view is to depend on.
       </para>
      </listitem>
     </varlistentry>

@@ -3,7 +3,7 @@
  * hashutil.c
  *	  Utility code for Postgres hash implementation.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,6 +20,8 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 
+#define CALC_NEW_BUCKET(old_bucket, lowmask) \
+			old_bucket | (lowmask + 1)
 
 /*
  * _hash_checkqual -- does the index tuple satisfy the scan conditions?
@@ -240,27 +242,37 @@ _hash_get_indextuple_hashkey(IndexTuple itup)
 }
 
 /*
- * _hash_form_tuple - form an index tuple containing hash code only
+ * _hash_convert_tuple - convert raw index data to hash key
+ *
+ * Inputs: values and isnull arrays for the user data column(s)
+ * Outputs: values and isnull arrays for the index tuple, suitable for
+ *		passing to index_form_tuple().
+ *
+ * Returns true if successful, false if not (because there are null values).
+ * On a false result, the given data need not be indexed.
+ *
+ * Note: callers know that the index-column arrays are always of length 1.
+ * In principle, there could be more than one input column, though we do not
+ * currently support that.
  */
-IndexTuple
-_hash_form_tuple(Relation index, Datum *values, bool *isnull)
+bool
+_hash_convert_tuple(Relation index,
+					Datum *user_values, bool *user_isnull,
+					Datum *index_values, bool *index_isnull)
 {
-	IndexTuple	itup;
 	uint32		hashkey;
-	Datum		hashkeydatum;
-	TupleDesc	hashdesc;
 
-	if (isnull[0])
-		hashkeydatum = (Datum) 0;
-	else
-	{
-		hashkey = _hash_datum2hashkey(index, values[0]);
-		hashkeydatum = UInt32GetDatum(hashkey);
-	}
-	hashdesc = RelationGetDescr(index);
-	Assert(hashdesc->natts == 1);
-	itup = index_form_tuple(hashdesc, &hashkeydatum, isnull);
-	return itup;
+	/*
+	 * We do not insert null values into hash indexes.  This is okay because
+	 * the only supported search operator is '=', and we assume it is strict.
+	 */
+	if (user_isnull[0])
+		return false;
+
+	hashkey = _hash_datum2hashkey(index, user_values[0]);
+	index_values[0] = UInt32GetDatum(hashkey);
+	index_isnull[0] = false;
+	return true;
 }
 
 /*
@@ -341,4 +353,96 @@ _hash_binsearch_last(Page page, uint32 hash_value)
 	}
 
 	return lower;
+}
+
+/*
+ *	_hash_get_oldblock_from_newbucket() -- get the block number of a bucket
+ *			from which current (new) bucket is being split.
+ */
+BlockNumber
+_hash_get_oldblock_from_newbucket(Relation rel, Bucket new_bucket)
+{
+	Bucket		old_bucket;
+	uint32		mask;
+	Buffer		metabuf;
+	HashMetaPage metap;
+	BlockNumber blkno;
+
+	/*
+	 * To get the old bucket from the current bucket, we need a mask to modulo
+	 * into lower half of table.  This mask is stored in meta page as
+	 * hashm_lowmask, but here we can't rely on the same, because we need a
+	 * value of lowmask that was prevalent at the time when bucket split was
+	 * started.  Masking the most significant bit of new bucket would give us
+	 * old bucket.
+	 */
+	mask = (((uint32) 1) << (fls(new_bucket) - 1)) - 1;
+	old_bucket = new_bucket & mask;
+
+	metabuf = _hash_getbuf(rel, HASH_METAPAGE, HASH_READ, LH_META_PAGE);
+	metap = HashPageGetMeta(BufferGetPage(metabuf));
+
+	blkno = BUCKET_TO_BLKNO(metap, old_bucket);
+
+	_hash_relbuf(rel, metabuf);
+
+	return blkno;
+}
+
+/*
+ *	_hash_get_newblock_from_oldbucket() -- get the block number of a bucket
+ *			that will be generated after split from old bucket.
+ *
+ * This is used to find the new bucket from old bucket based on current table
+ * half.  It is mainly required to finish the incomplete splits where we are
+ * sure that not more than one bucket could have split in progress from old
+ * bucket.
+ */
+BlockNumber
+_hash_get_newblock_from_oldbucket(Relation rel, Bucket old_bucket)
+{
+	Bucket		new_bucket;
+	Buffer		metabuf;
+	HashMetaPage metap;
+	BlockNumber blkno;
+
+	metabuf = _hash_getbuf(rel, HASH_METAPAGE, HASH_READ, LH_META_PAGE);
+	metap = HashPageGetMeta(BufferGetPage(metabuf));
+
+	new_bucket = _hash_get_newbucket_from_oldbucket(rel, old_bucket,
+													metap->hashm_lowmask,
+													metap->hashm_maxbucket);
+	blkno = BUCKET_TO_BLKNO(metap, new_bucket);
+
+	_hash_relbuf(rel, metabuf);
+
+	return blkno;
+}
+
+/*
+ *	_hash_get_newbucket_from_oldbucket() -- get the new bucket that will be
+ *			generated after split from current (old) bucket.
+ *
+ * This is used to find the new bucket from old bucket.  New bucket can be
+ * obtained by OR'ing old bucket with most significant bit of current table
+ * half (lowmask passed in this function can be used to identify msb of
+ * current table half).  There could be multiple buckets that could have
+ * been split from current bucket.  We need the first such bucket that exists.
+ * Caller must ensure that no more than one split has happened from old
+ * bucket.
+ */
+Bucket
+_hash_get_newbucket_from_oldbucket(Relation rel, Bucket old_bucket,
+								   uint32 lowmask, uint32 maxbucket)
+{
+	Bucket		new_bucket;
+
+	new_bucket = CALC_NEW_BUCKET(old_bucket, lowmask);
+	if (new_bucket > maxbucket)
+	{
+		lowmask = lowmask >> 1;
+		new_bucket = CALC_NEW_BUCKET(old_bucket, lowmask);
+	}
+
+	return new_bucket;
 }

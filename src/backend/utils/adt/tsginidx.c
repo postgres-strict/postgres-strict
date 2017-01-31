@@ -3,7 +3,7 @@
  * tsginidx.c
  *	 GIN support functions for tsvector_ops
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -179,13 +179,15 @@ typedef struct
 } GinChkVal;
 
 static GinTernaryValue
-checkcondition_gin(void *checkval, QueryOperand *val)
+checkcondition_gin_internal(GinChkVal *gcv, QueryOperand *val, ExecPhraseData *data)
 {
-	GinChkVal  *gcv = (GinChkVal *) checkval;
 	int			j;
 
-	/* if any val requiring a weight is used, set recheck flag */
-	if (val->weight != 0)
+	/*
+	 * if any val requiring a weight is used or caller needs position
+	 * information then set recheck flag
+	 */
+	if (val->weight != 0 || data != NULL)
 		*(gcv->need_recheck) = true;
 
 	/* convert item's number to corresponding entry's (operand's) number */
@@ -196,15 +198,21 @@ checkcondition_gin(void *checkval, QueryOperand *val)
 }
 
 /*
+ * Wrapper of check condition function for TS_execute.
+ */
+static bool
+checkcondition_gin(void *checkval, QueryOperand *val, ExecPhraseData *data)
+{
+	return checkcondition_gin_internal((GinChkVal *) checkval,
+									   val,
+									   data) != GIN_FALSE;
+}
+
+/*
  * Evaluate tsquery boolean expression using ternary logic.
- *
- * chkcond is a callback function used to evaluate each VAL node in the query.
- * checkval can be used to pass information to the callback. TS_execute doesn't
- * do anything with it.
  */
 static GinTernaryValue
-TS_execute_ternary(QueryItem *curitem, void *checkval,
-			  GinTernaryValue (*chkcond) (void *checkval, QueryOperand *val))
+TS_execute_ternary(GinChkVal *gcv, QueryItem *curitem, bool in_phrase)
 {
 	GinTernaryValue val1,
 				val2,
@@ -214,22 +222,40 @@ TS_execute_ternary(QueryItem *curitem, void *checkval,
 	check_stack_depth();
 
 	if (curitem->type == QI_VAL)
-		return chkcond(checkval, (QueryOperand *) curitem);
+		return
+			checkcondition_gin_internal(gcv,
+										(QueryOperand *) curitem,
+										NULL /* don't have position info */ );
 
 	switch (curitem->qoperator.oper)
 	{
 		case OP_NOT:
-			result = TS_execute_ternary(curitem + 1, checkval, chkcond);
+			/* In phrase search, always return MAYBE since we lack positions */
+			if (in_phrase)
+				return GIN_MAYBE;
+			result = TS_execute_ternary(gcv, curitem + 1, in_phrase);
 			if (result == GIN_MAYBE)
 				return result;
 			return !result;
 
+		case OP_PHRASE:
+
+			/*
+			 * GIN doesn't contain any information about positions, so treat
+			 * OP_PHRASE as OP_AND with recheck requirement
+			 */
+			*(gcv->need_recheck) = true;
+			/* Pass down in_phrase == true in case there's a NOT below */
+			in_phrase = true;
+
+			/* FALL THRU */
+
 		case OP_AND:
-			val1 = TS_execute_ternary(curitem + curitem->qoperator.left,
-									  checkval, chkcond);
+			val1 = TS_execute_ternary(gcv, curitem + curitem->qoperator.left,
+									  in_phrase);
 			if (val1 == GIN_FALSE)
 				return GIN_FALSE;
-			val2 = TS_execute_ternary(curitem + 1, checkval, chkcond);
+			val2 = TS_execute_ternary(gcv, curitem + 1, in_phrase);
 			if (val2 == GIN_FALSE)
 				return GIN_FALSE;
 			if (val1 == GIN_TRUE && val2 == GIN_TRUE)
@@ -238,11 +264,11 @@ TS_execute_ternary(QueryItem *curitem, void *checkval,
 				return GIN_MAYBE;
 
 		case OP_OR:
-			val1 = TS_execute_ternary(curitem + curitem->qoperator.left,
-									  checkval, chkcond);
+			val1 = TS_execute_ternary(gcv, curitem + curitem->qoperator.left,
+									  in_phrase);
 			if (val1 == GIN_TRUE)
 				return GIN_TRUE;
-			val2 = TS_execute_ternary(curitem + 1, checkval, chkcond);
+			val2 = TS_execute_ternary(gcv, curitem + 1, in_phrase);
 			if (val2 == GIN_TRUE)
 				return GIN_TRUE;
 			if (val1 == GIN_FALSE && val2 == GIN_FALSE)
@@ -271,26 +297,25 @@ gin_tsquery_consistent(PG_FUNCTION_ARGS)
 	bool	   *recheck = (bool *) PG_GETARG_POINTER(5);
 	bool		res = FALSE;
 
-	/* The query requires recheck only if it involves weights */
+	/* Initially assume query doesn't require recheck */
 	*recheck = false;
 
 	if (query->size > 0)
 	{
-		QueryItem  *item;
 		GinChkVal	gcv;
 
 		/*
 		 * check-parameter array has one entry for each value (operand) in the
 		 * query.
 		 */
-		gcv.first_item = item = GETQUERY(query);
+		gcv.first_item = GETQUERY(query);
 		gcv.check = check;
 		gcv.map_item_operand = (int *) (extra_data[0]);
 		gcv.need_recheck = recheck;
 
 		res = TS_execute(GETQUERY(query),
 						 &gcv,
-						 true,
+						 TS_EXEC_CALC_NOT | TS_EXEC_PHRASE_NO_POS,
 						 checkcondition_gin);
 	}
 
@@ -310,26 +335,23 @@ gin_tsquery_triconsistent(PG_FUNCTION_ARGS)
 	GinTernaryValue res = GIN_FALSE;
 	bool		recheck;
 
-	/* The query requires recheck only if it involves weights */
+	/* Initially assume query doesn't require recheck */
 	recheck = false;
 
 	if (query->size > 0)
 	{
-		QueryItem  *item;
 		GinChkVal	gcv;
 
 		/*
 		 * check-parameter array has one entry for each value (operand) in the
 		 * query.
 		 */
-		gcv.first_item = item = GETQUERY(query);
+		gcv.first_item = GETQUERY(query);
 		gcv.check = check;
 		gcv.map_item_operand = (int *) (extra_data[0]);
 		gcv.need_recheck = &recheck;
 
-		res = TS_execute_ternary(GETQUERY(query),
-								 &gcv,
-								 checkcondition_gin);
+		res = TS_execute_ternary(&gcv, GETQUERY(query), false);
 
 		if (res == GIN_TRUE && recheck)
 			res = GIN_MAYBE;
@@ -375,5 +397,25 @@ gin_tsquery_consistent_6args(PG_FUNCTION_ARGS)
 {
 	if (PG_NARGS() < 8)			/* should not happen */
 		elog(ERROR, "gin_tsquery_consistent requires eight arguments");
+	return gin_tsquery_consistent(fcinfo);
+}
+
+/*
+ * Likewise, a stub version of gin_extract_tsquery declared with argument
+ * types that are no longer considered appropriate.
+ */
+Datum
+gin_extract_tsquery_oldsig(PG_FUNCTION_ARGS)
+{
+	return gin_extract_tsquery(fcinfo);
+}
+
+/*
+ * Likewise, a stub version of gin_tsquery_consistent declared with argument
+ * types that are no longer considered appropriate.
+ */
+Datum
+gin_tsquery_consistent_oldsig(PG_FUNCTION_ARGS)
+{
 	return gin_tsquery_consistent(fcinfo);
 }

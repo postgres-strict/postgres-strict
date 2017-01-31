@@ -4,7 +4,7 @@
  *	  XML data type support.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/utils/adt/xml.c
@@ -161,7 +161,7 @@ static const char *map_sql_catalog_to_xmlschema_types(List *nspid_list,
 static const char *map_sql_type_to_xml_name(Oid typeoid, int typmod);
 static const char *map_sql_typecoll_to_xmlschema_types(List *tupdesc_list);
 static const char *map_sql_type_to_xmlschema_type(Oid typeoid, int typmod);
-static void SPI_sql_row_to_xmlelement(int rownum, StringInfo result,
+static void SPI_sql_row_to_xmlelement(uint64 rownum, StringInfo result,
 						  char *tablename, bool nulls, bool tableforest,
 						  const char *targetns, bool top_level);
 
@@ -603,7 +603,7 @@ xmlelement(XmlExprState *xmlExpr, ExprContext *econtext)
 		bool		isnull;
 		char	   *str;
 
-		value = ExecEvalExpr(e, econtext, &isnull, NULL);
+		value = ExecEvalExpr(e, econtext, &isnull);
 		if (isnull)
 			str = NULL;
 		else
@@ -620,7 +620,7 @@ xmlelement(XmlExprState *xmlExpr, ExprContext *econtext)
 		bool		isnull;
 		char	   *str;
 
-		value = ExecEvalExpr(e, econtext, &isnull, NULL);
+		value = ExecEvalExpr(e, econtext, &isnull);
 		/* here we can just forget NULL elements immediately */
 		if (!isnull)
 		{
@@ -1455,10 +1455,8 @@ xml_memory_init(void)
 	/* Create memory context if not there already */
 	if (LibxmlContext == NULL)
 		LibxmlContext = AllocSetContextCreate(TopMemoryContext,
-											  "LibxmlContext",
-											  ALLOCSET_DEFAULT_MINSIZE,
-											  ALLOCSET_DEFAULT_INITSIZE,
-											  ALLOCSET_DEFAULT_MAXSIZE);
+											  "Libxml context",
+											  ALLOCSET_DEFAULT_SIZES);
 
 	/* Re-establish the callbacks even if already set */
 	xmlMemSetup(xml_pfree, xml_palloc, xml_repalloc, xml_pstrdup);
@@ -2260,7 +2258,7 @@ _SPI_strdup(const char *s)
 static List *
 query_to_oid_list(const char *query)
 {
-	int			i;
+	uint64		i;
 	List	   *list = NIL;
 
 	SPI_execute(query, true, 0);
@@ -2379,7 +2377,7 @@ cursor_to_xml(PG_FUNCTION_ARGS)
 
 	StringInfoData result;
 	Portal		portal;
-	int			i;
+	uint64		i;
 
 	initStringInfo(&result);
 
@@ -2454,7 +2452,7 @@ query_to_xml_internal(const char *query, char *tablename,
 {
 	StringInfo	result;
 	char	   *xmltn;
-	int			i;
+	uint64		i;
 
 	if (tablename)
 		xmltn = map_sql_identifier_to_xml_name(tablename, true, false);
@@ -2646,8 +2644,6 @@ schema_to_xml_internal(Oid nspid, const char *xmlschema, bool nulls,
 
 	relid_list = schema_get_xml_visible_tables(nspid);
 
-	SPI_push();
-
 	foreach(cell, relid_list)
 	{
 		Oid			relid = lfirst_oid(cell);
@@ -2660,7 +2656,6 @@ schema_to_xml_internal(Oid nspid, const char *xmlschema, bool nulls,
 		appendStringInfoChar(result, '\n');
 	}
 
-	SPI_pop();
 	SPI_finish();
 
 	xmldata_root_element_end(result, xmlsn);
@@ -2824,8 +2819,6 @@ database_to_xml_internal(const char *xmlschema, bool nulls,
 
 	nspid_list = database_get_xml_visible_schemas();
 
-	SPI_push();
-
 	foreach(cell, nspid_list)
 	{
 		Oid			nspid = lfirst_oid(cell);
@@ -2838,7 +2831,6 @@ database_to_xml_internal(const char *xmlschema, bool nulls,
 		appendStringInfoChar(result, '\n');
 	}
 
-	SPI_pop();
 	SPI_finish();
 
 	xmldata_root_element_end(result, xmlcn);
@@ -3532,7 +3524,7 @@ map_sql_type_to_xmlschema_type(Oid typeoid, int typmod)
  * SPI cursor.  See also SQL/XML:2008 section 9.10.
  */
 static void
-SPI_sql_row_to_xmlelement(int rownum, StringInfo result, char *tablename,
+SPI_sql_row_to_xmlelement(uint64 rownum, StringInfo result, char *tablename,
 						  bool nulls, bool tableforest,
 						  const char *targetns, bool top_level)
 {

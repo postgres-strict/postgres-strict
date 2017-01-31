@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2016, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2017, PostgreSQL Global Development Group
  *
  * src/bin/psql/command.c
  */
@@ -35,17 +35,18 @@
 
 #include "libpq-fe.h"
 #include "pqexpbuffer.h"
-#include "dumputils.h"
+#include "fe_utils/string_utils.h"
 
 #include "common.h"
 #include "copy.h"
+#include "crosstabview.h"
 #include "describe.h"
 #include "help.h"
 #include "input.h"
 #include "large_obj.h"
 #include "mainloop.h"
-#include "print.h"
-#include "psqlscan.h"
+#include "fe_utils/print.h"
+#include "psqlscanslash.h"
 #include "settings.h"
 #include "variables.h"
 
@@ -64,9 +65,10 @@ static backslashResult exec_command(const char *cmd,
 			 PQExpBuffer query_buf);
 static bool do_edit(const char *filename_arg, PQExpBuffer query_buf,
 		int lineno, bool *edited);
-static bool do_connect(char *dbname, char *user, char *host, char *port);
+static bool do_connect(enum trivalue reuse_previous_specification,
+		   char *dbname, char *user, char *host, char *port);
 static bool do_shell(const char *command);
-static bool do_watch(PQExpBuffer query_buf, long sleep);
+static bool do_watch(PQExpBuffer query_buf, double sleep);
 static bool lookup_object_oid(EditableObjectType obj_type, const char *desc,
 				  Oid *obj_oid);
 static bool get_create_object_cmd(EditableObjectType obj_type, Oid oid,
@@ -230,12 +232,9 @@ exec_command(const char *cmd,
 	/*
 	 * \c or \connect -- connect to database using the specified parameters.
 	 *
-	 * \c dbname user host port
+	 * \c [-reuse-previous=BOOL] dbname user host port
 	 *
-	 * If any of these parameters are omitted or specified as '-', the current
-	 * value of the parameter will be used instead. If the parameter has no
-	 * current value, the default value for that parameter will be used. Some
-	 * examples:
+	 * Specifying a parameter as '-' is equivalent to omitting it.  Examples:
 	 *
 	 * \c - - hst		Connect to current database on current port of host
 	 * "hst" as current user. \c - usr - prt   Connect to current database on
@@ -244,22 +243,42 @@ exec_command(const char *cmd,
 	 */
 	else if (strcmp(cmd, "c") == 0 || strcmp(cmd, "connect") == 0)
 	{
+		static const char prefix[] = "-reuse-previous=";
 		char	   *opt1,
 				   *opt2,
 				   *opt3,
 				   *opt4;
+		enum trivalue reuse_previous = TRI_DEFAULT;
 
 		opt1 = read_connect_arg(scan_state);
-		opt2 = read_connect_arg(scan_state);
-		opt3 = read_connect_arg(scan_state);
-		opt4 = read_connect_arg(scan_state);
+		if (opt1 != NULL && strncmp(opt1, prefix, sizeof(prefix) - 1) == 0)
+		{
+			bool		on_off;
 
-		success = do_connect(opt1, opt2, opt3, opt4);
+			success = ParseVariableBool(opt1 + sizeof(prefix) - 1,
+										"-reuse-previous",
+										&on_off);
+			if (success)
+			{
+				reuse_previous = on_off ? TRI_YES : TRI_NO;
+				free(opt1);
+				opt1 = read_connect_arg(scan_state);
+			}
+		}
 
+		if (success)			/* give up if reuse_previous was invalid */
+		{
+			opt2 = read_connect_arg(scan_state);
+			opt3 = read_connect_arg(scan_state);
+			opt4 = read_connect_arg(scan_state);
+
+			success = do_connect(reuse_previous, opt1, opt2, opt3, opt4);
+
+			free(opt2);
+			free(opt3);
+			free(opt4);
+		}
 		free(opt1);
-		free(opt2);
-		free(opt3);
-		free(opt4);
 	}
 
 	/* \cd */
@@ -364,6 +383,18 @@ exec_command(const char *cmd,
 	else if (strcmp(cmd, "copyright") == 0)
 		print_copyright();
 
+	/* \crosstabview -- execute a query and display results in crosstab */
+	else if (strcmp(cmd, "crosstabview") == 0)
+	{
+		int			i;
+
+		for (i = 0; i < lengthof(pset.ctv_args); i++)
+			pset.ctv_args[i] = psql_scan_slash_option(scan_state,
+													  OT_NORMAL, NULL, true);
+		pset.crosstab_flag = true;
+		status = PSQL_CMD_SEND;
+	}
+
 	/* \d* commands */
 	else if (cmd[0] == 'd')
 	{
@@ -388,6 +419,9 @@ exec_command(const char *cmd,
 				else
 					/* standard listing of interesting things */
 					success = listTables("tvmsE", NULL, show_verbose, show_system);
+				break;
+			case 'A':
+				success = describeAccessMethods(pattern, show_verbose);
 				break;
 			case 'a':
 				success = describeAggregates(pattern, show_verbose, show_system);
@@ -429,7 +463,7 @@ exec_command(const char *cmd,
 				break;
 			case 'g':
 				/* no longer distinct from \du */
-				success = describeRoles(pattern, show_verbose);
+				success = describeRoles(pattern, show_verbose, show_system);
 				break;
 			case 'l':
 				success = do_lo_list();
@@ -473,8 +507,24 @@ exec_command(const char *cmd,
 				else
 					success = PSQL_CMD_UNKNOWN;
 				break;
+			case 'R':
+				switch (cmd[2])
+				{
+					case 'p':
+						if (show_verbose)
+							success = describePublications(pattern);
+						else
+							success = listPublications(pattern);
+						break;
+					case 's':
+						success = describeSubscriptions(pattern, show_verbose);
+						break;
+					default:
+						status = PSQL_CMD_UNKNOWN;
+				}
+				break;
 			case 'u':
-				success = describeRoles(pattern, show_verbose);
+				success = describeRoles(pattern, show_verbose, show_system);
 				break;
 			case 'F':			/* text search subsystem */
 				switch (cmd[2])
@@ -607,8 +657,11 @@ exec_command(const char *cmd,
 
 		if (pset.sversion < 80400)
 		{
-			psql_error("The server (version %d.%d) does not support editing function source.\n",
-					   pset.sversion / 10000, (pset.sversion / 100) % 100);
+			char		sverbuf[32];
+
+			psql_error("The server (version %s) does not support editing function source.\n",
+					   formatPGVersionNumber(pset.sversion, false,
+											 sverbuf, sizeof(sverbuf)));
 			status = PSQL_CMD_ERROR;
 		}
 		else if (!query_buf)
@@ -703,8 +756,11 @@ exec_command(const char *cmd,
 
 		if (pset.sversion < 70400)
 		{
-			psql_error("The server (version %d.%d) does not support editing view definitions.\n",
-					   pset.sversion / 10000, (pset.sversion / 100) % 100);
+			char		sverbuf[32];
+
+			psql_error("The server (version %s) does not support editing view definitions.\n",
+					   formatPGVersionNumber(pset.sversion, false,
+											 sverbuf, sizeof(sverbuf)));
 			status = PSQL_CMD_ERROR;
 		}
 		else if (!query_buf)
@@ -822,6 +878,28 @@ exec_command(const char *cmd,
 		}
 	}
 
+	/* \errverbose -- display verbose message from last failed query */
+	else if (strcmp(cmd, "errverbose") == 0)
+	{
+		if (pset.last_error_result)
+		{
+			char	   *msg;
+
+			msg = PQresultVerboseErrorMessage(pset.last_error_result,
+											  PQERRORS_VERBOSE,
+											  PQSHOW_CONTEXT_ALWAYS);
+			if (msg)
+			{
+				psql_error("%s", msg);
+				PQfreemem(msg);
+			}
+			else
+				puts(_("out of memory"));
+		}
+		else
+			puts(_("There is no previous error."));
+	}
+
 	/* \f -- change field separator */
 	else if (strcmp(cmd, "f") == 0)
 	{
@@ -846,6 +924,13 @@ exec_command(const char *cmd,
 			pset.gfname = pg_strdup(fname);
 		}
 		free(fname);
+		status = PSQL_CMD_SEND;
+	}
+
+	/* \gexec -- send query and execute each field of result */
+	else if (strcmp(cmd, "gexec") == 0)
+	{
+		pset.gexec_flag = true;
 		status = PSQL_CMD_SEND;
 	}
 
@@ -1026,11 +1111,11 @@ exec_command(const char *cmd,
 	/* \password -- set user password */
 	else if (strcmp(cmd, "password") == 0)
 	{
-		char	   *pw1;
-		char	   *pw2;
+		char		pw1[100];
+		char		pw2[100];
 
-		pw1 = simple_prompt("Enter new password: ", 100, false);
-		pw2 = simple_prompt("Enter it again: ", 100, false);
+		simple_prompt("Enter new password: ", pw1, sizeof(pw1), false);
+		simple_prompt("Enter it again: ", pw2, sizeof(pw2), false);
 
 		if (strcmp(pw1, pw2) != 0)
 		{
@@ -1076,9 +1161,6 @@ exec_command(const char *cmd,
 			if (opt0)
 				free(opt0);
 		}
-
-		free(pw1);
-		free(pw2);
 	}
 
 	/* \prompt -- prompt and set variable */
@@ -1110,7 +1192,10 @@ exec_command(const char *cmd,
 				opt = arg1;
 
 			if (!pset.inputfile)
-				result = simple_prompt(prompt_text, 4096, true);
+			{
+				result = (char *) pg_malloc(4096);
+				simple_prompt(prompt_text, result, 4096, true);
+			}
 			else
 			{
 				if (prompt_text)
@@ -1119,15 +1204,20 @@ exec_command(const char *cmd,
 					fflush(stdout);
 				}
 				result = gets_fromFile(stdin);
+				if (!result)
+				{
+					psql_error("\\%s: could not read value for variable\n",
+							   cmd);
+					success = false;
+				}
 			}
 
-			if (!SetVariable(pset.vars, opt, result))
-			{
-				psql_error("\\%s: error while setting variable\n", cmd);
+			if (result &&
+				!SetVariable(pset.vars, opt, result))
 				success = false;
-			}
 
-			free(result);
+			if (result)
+				free(result);
 			if (prompt_text)
 				free(prompt_text);
 			free(opt);
@@ -1238,10 +1328,8 @@ exec_command(const char *cmd,
 			}
 
 			if (!SetVariable(pset.vars, opt0, newval))
-			{
-				psql_error("\\%s: error while setting variable\n", cmd);
 				success = false;
-			}
+
 			free(newval);
 		}
 		free(opt0);
@@ -1305,8 +1393,11 @@ exec_command(const char *cmd,
 									  OT_WHOLE_LINE, NULL, true);
 		if (pset.sversion < 80400)
 		{
-			psql_error("The server (version %d.%d) does not support showing function source.\n",
-					   pset.sversion / 10000, (pset.sversion / 100) % 100);
+			char		sverbuf[32];
+
+			psql_error("The server (version %s) does not support showing function source.\n",
+					   formatPGVersionNumber(pset.sversion, false,
+											 sverbuf, sizeof(sverbuf)));
 			status = PSQL_CMD_ERROR;
 		}
 		else if (!func)
@@ -1384,8 +1475,11 @@ exec_command(const char *cmd,
 									  OT_WHOLE_LINE, NULL, true);
 		if (pset.sversion < 70400)
 		{
-			psql_error("The server (version %d.%d) does not support showing view definitions.\n",
-					   pset.sversion / 10000, (pset.sversion / 100) % 100);
+			char		sverbuf[32];
+
+			psql_error("The server (version %s) does not support showing view definitions.\n",
+					   formatPGVersionNumber(pset.sversion, false,
+											 sverbuf, sizeof(sverbuf)));
 			status = PSQL_CMD_ERROR;
 		}
 		else if (!view)
@@ -1471,7 +1565,7 @@ exec_command(const char *cmd,
 												 OT_NORMAL, NULL, false);
 
 		if (opt)
-			pset.timing = ParseVariableBool(opt, "\\timing");
+			success = ParseVariableBool(opt, "\\timing", &pset.timing);
 		else
 			pset.timing = !pset.timing;
 		if (!pset.quiet)
@@ -1496,10 +1590,8 @@ exec_command(const char *cmd,
 			success = false;
 		}
 		else if (!SetVariable(pset.vars, opt, NULL))
-		{
-			psql_error("\\%s: error while setting variable\n", cmd);
 			success = false;
-		}
+
 		free(opt);
 	}
 
@@ -1577,12 +1669,12 @@ exec_command(const char *cmd,
 	{
 		char	   *opt = psql_scan_slash_option(scan_state,
 												 OT_NORMAL, NULL, true);
-		long		sleep = 2;
+		double		sleep = 2;
 
 		/* Convert optional sleep-length argument */
 		if (opt)
 		{
-			sleep = strtol(opt, NULL, 10);
+			sleep = strtod(opt, NULL);
 			if (sleep <= 0)
 				sleep = 1;
 			free(opt);
@@ -1678,20 +1770,19 @@ exec_command(const char *cmd,
 static char *
 prompt_for_password(const char *username)
 {
-	char	   *result;
+	char		buf[100];
 
 	if (username == NULL)
-		result = simple_prompt("Password: ", 100, false);
+		simple_prompt("Password: ", buf, sizeof(buf), false);
 	else
 	{
 		char	   *prompt_text;
 
 		prompt_text = psprintf(_("Password for user %s: "), username);
-		result = simple_prompt(prompt_text, 100, false);
+		simple_prompt(prompt_text, buf, sizeof(buf), false);
 		free(prompt_text);
 	}
-
-	return result;
+	return pg_strdup(buf);
 }
 
 static bool
@@ -1709,22 +1800,26 @@ param_is_newly_set(const char *old_val, const char *new_val)
 /*
  * do_connect -- handler for \connect
  *
- * Connects to a database with given parameters. If there exists an
- * established connection, NULL values will be replaced with the ones
- * in the current connection. Otherwise NULL will be passed for that
- * parameter to PQconnectdbParams(), so the libpq defaults will be used.
+ * Connects to a database with given parameters. Absent an established
+ * connection, all parameters are required. Given -reuse-previous=off or a
+ * connection string without -reuse-previous=on, NULL values will pass through
+ * to PQconnectdbParams(), so the libpq defaults will be used. Otherwise, NULL
+ * values will be replaced with the ones in the current connection.
  *
  * In interactive mode, if connection fails with the given parameters,
  * the old connection will be kept.
  */
 static bool
-do_connect(char *dbname, char *user, char *host, char *port)
+do_connect(enum trivalue reuse_previous_specification,
+		   char *dbname, char *user, char *host, char *port)
 {
 	PGconn	   *o_conn = pset.db,
 			   *n_conn;
 	char	   *password = NULL;
 	bool		keep_password;
 	bool		has_connection_string;
+	bool		reuse_previous;
+	PQExpBufferData connstr;
 
 	if (!o_conn && (!dbname || !user || !host || !port))
 	{
@@ -1738,16 +1833,35 @@ do_connect(char *dbname, char *user, char *host, char *port)
 		return false;
 	}
 
-	/* grab values from the old connection, unless supplied by caller */
-	if (!user)
-		user = PQuser(o_conn);
-	if (!host)
-		host = PQhost(o_conn);
-	if (!port)
-		port = PQport(o_conn);
+	has_connection_string = dbname ?
+		recognized_connection_string(dbname) : false;
+	switch (reuse_previous_specification)
+	{
+		case TRI_YES:
+			reuse_previous = true;
+			break;
+		case TRI_NO:
+			reuse_previous = false;
+			break;
+		default:
+			reuse_previous = !has_connection_string;
+			break;
+	}
+	/* Silently ignore arguments subsequent to a connection string. */
+	if (has_connection_string)
+	{
+		user = NULL;
+		host = NULL;
+		port = NULL;
+	}
 
-	has_connection_string =
-		dbname ? recognized_connection_string(dbname) : false;
+	/* grab missing values from the old connection */
+	if (!user && reuse_previous)
+		user = PQuser(o_conn);
+	if (!host && reuse_previous)
+		host = PQhost(o_conn);
+	if (!port && reuse_previous)
+		port = PQport(o_conn);
 
 	/*
 	 * Any change in the parameters read above makes us discard the password.
@@ -1763,11 +1877,19 @@ do_connect(char *dbname, char *user, char *host, char *port)
 			(port && PQport(o_conn) && strcmp(port, PQport(o_conn)) == 0);
 
 	/*
-	 * Grab dbname from old connection unless supplied by caller.  No password
-	 * discard if this changes: passwords aren't (usually) database-specific.
+	 * Grab missing dbname from old connection.  No password discard if this
+	 * changes: passwords aren't (usually) database-specific.
 	 */
-	if (!dbname)
-		dbname = PQdb(o_conn);
+	if (!dbname && reuse_previous)
+	{
+		initPQExpBuffer(&connstr);
+		appendPQExpBuffer(&connstr, "dbname=");
+		appendConnStrVal(&connstr, PQdb(o_conn));
+		dbname = connstr.data;
+		/* has_connection_string=true would be a dead store */
+	}
+	else
+		connstr.data = NULL;
 
 	/*
 	 * If the user asked to be prompted for a password, ask for one now. If
@@ -1797,20 +1919,27 @@ do_connect(char *dbname, char *user, char *host, char *port)
 #define PARAMS_ARRAY_SIZE	8
 		const char **keywords = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
 		const char **values = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
-		int			paramnum = 0;
+		int			paramnum = -1;
 
-		keywords[0] = "dbname";
-		values[0] = dbname;
+		keywords[++paramnum] = "host";
+		values[paramnum] = host;
+		keywords[++paramnum] = "port";
+		values[paramnum] = port;
+		keywords[++paramnum] = "user";
+		values[paramnum] = user;
 
-		if (!has_connection_string)
-		{
-			keywords[++paramnum] = "host";
-			values[paramnum] = host;
-			keywords[++paramnum] = "port";
-			values[paramnum] = port;
-			keywords[++paramnum] = "user";
-			values[paramnum] = user;
-		}
+		/*
+		 * Position in the array matters when the dbname is a connection
+		 * string, because settings in a connection string override earlier
+		 * array entries only.  Thus, user= in the connection string always
+		 * takes effect, but client_encoding= often will not.
+		 *
+		 * If you change this code, also change the initial-connection code in
+		 * main().  For no good reason, a connection string password= takes
+		 * precedence in main() but not here.
+		 */
+		keywords[++paramnum] = "dbname";
+		values[paramnum] = dbname;
 		keywords[++paramnum] = "password";
 		values[paramnum] = password;
 		keywords[++paramnum] = "fallback_application_name";
@@ -1869,8 +1998,12 @@ do_connect(char *dbname, char *user, char *host, char *port)
 		}
 
 		PQfinish(n_conn);
+		if (connstr.data)
+			termPQExpBuffer(&connstr);
 		return false;
 	}
+	if (connstr.data)
+		termPQExpBuffer(&connstr);
 
 	/*
 	 * Replace the old connection with the new one, and update
@@ -1915,22 +2048,21 @@ connection_warnings(bool in_startup)
 	if (!pset.quiet && !pset.notty)
 	{
 		int			client_ver = PG_VERSION_NUM;
+		char		cverbuf[32];
+		char		sverbuf[32];
 
 		if (pset.sversion != client_ver)
 		{
 			const char *server_version;
-			char		server_ver_str[16];
 
 			/* Try to get full text form, might include "devel" etc */
 			server_version = PQparameterStatus(pset.db, "server_version");
+			/* Otherwise fall back on pset.sversion */
 			if (!server_version)
 			{
-				snprintf(server_ver_str, sizeof(server_ver_str),
-						 "%d.%d.%d",
-						 pset.sversion / 10000,
-						 (pset.sversion / 100) % 100,
-						 pset.sversion % 100);
-				server_version = server_ver_str;
+				formatPGVersionNumber(pset.sversion, true,
+									  sverbuf, sizeof(sverbuf));
+				server_version = sverbuf;
 			}
 
 			printf(_("%s (%s, server %s)\n"),
@@ -1941,10 +2073,13 @@ connection_warnings(bool in_startup)
 			printf("%s (%s)\n", pset.progname, PG_VERSION);
 
 		if (pset.sversion / 100 > client_ver / 100)
-			printf(_("WARNING: %s major version %d.%d, server major version %d.%d.\n"
+			printf(_("WARNING: %s major version %s, server major version %s.\n"
 					 "         Some psql features might not work.\n"),
-				 pset.progname, client_ver / 10000, (client_ver / 100) % 100,
-				   pset.sversion / 10000, (pset.sversion / 100) % 100);
+				   pset.progname,
+				   formatPGVersionNumber(client_ver, false,
+										 cverbuf, sizeof(cverbuf)),
+				   formatPGVersionNumber(pset.sversion, false,
+										 sverbuf, sizeof(sverbuf)));
 
 #ifdef WIN32
 		checkWin32Codepage();
@@ -2457,7 +2592,6 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 			psql_error("\\pset: allowed formats are unaligned, aligned, wrapped, html, asciidoc, latex, latex-longtable, troff-ms\n");
 			return false;
 		}
-
 	}
 
 	/* set table line style */
@@ -2476,7 +2610,6 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 			psql_error("\\pset: allowed line styles are ascii, old-ascii, unicode\n");
 			return false;
 		}
-
 	}
 
 	/* set unicode border line style */
@@ -2529,7 +2662,6 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 	{
 		if (value)
 			popt->topt.border = atoi(value);
-
 	}
 
 	/* set expanded/vertical mode */
@@ -2540,7 +2672,17 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 		if (value && pg_strcasecmp(value, "auto") == 0)
 			popt->topt.expanded = 2;
 		else if (value)
-			popt->topt.expanded = ParseVariableBool(value, param);
+		{
+			bool		on_off;
+
+			if (ParseVariableBool(value, NULL, &on_off))
+				popt->topt.expanded = on_off ? 1 : 0;
+			else
+			{
+				PsqlVarEnumError(param, value, "on, off, auto");
+				return false;
+			}
+		}
 		else
 			popt->topt.expanded = !popt->topt.expanded;
 	}
@@ -2549,7 +2691,7 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 	else if (strcmp(param, "numericlocale") == 0)
 	{
 		if (value)
-			popt->topt.numericLocale = ParseVariableBool(value, param);
+			return ParseVariableBool(value, param, &popt->topt.numericLocale);
 		else
 			popt->topt.numericLocale = !popt->topt.numericLocale;
 	}
@@ -2604,7 +2746,7 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 	else if (strcmp(param, "t") == 0 || strcmp(param, "tuples_only") == 0)
 	{
 		if (value)
-			popt->topt.tuples_only = ParseVariableBool(value, param);
+			return ParseVariableBool(value, param, &popt->topt.tuples_only);
 		else
 			popt->topt.tuples_only = !popt->topt.tuples_only;
 	}
@@ -2636,10 +2778,14 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 			popt->topt.pager = 2;
 		else if (value)
 		{
-			if (ParseVariableBool(value, param))
-				popt->topt.pager = 1;
-			else
-				popt->topt.pager = 0;
+			bool		on_off;
+
+			if (!ParseVariableBool(value, NULL, &on_off))
+			{
+				PsqlVarEnumError(param, value, "on, off, always");
+				return false;
+			}
+			popt->topt.pager = on_off ? 1 : 0;
 		}
 		else if (popt->topt.pager == 1)
 			popt->topt.pager = 0;
@@ -2658,7 +2804,7 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 	else if (strcmp(param, "footer") == 0)
 	{
 		if (value)
-			popt->topt.default_footer = ParseVariableBool(value, param);
+			return ParseVariableBool(value, param, &popt->topt.default_footer);
 		else
 			popt->topt.default_footer = !popt->topt.default_footer;
 	}
@@ -3017,10 +3163,15 @@ do_shell(const char *command)
  * onto a bunch of exec_command's variables to silence stupider compilers.
  */
 static bool
-do_watch(PQExpBuffer query_buf, long sleep)
+do_watch(PQExpBuffer query_buf, double sleep)
 {
+	long		sleep_ms = (long) (sleep * 1000);
 	printQueryOpt myopt = pset.popt;
-	char		title[50];
+	const char *strftime_fmt;
+	const char *user_title;
+	char	   *title;
+	int			title_len;
+	int			res = 0;
 
 	if (!query_buf || query_buf->len <= 0)
 	{
@@ -3029,24 +3180,47 @@ do_watch(PQExpBuffer query_buf, long sleep)
 	}
 
 	/*
+	 * Choose format for timestamps.  We might eventually make this a \pset
+	 * option.  In the meantime, using a variable for the format suppresses
+	 * overly-anal-retentive gcc warnings about %c being Y2K sensitive.
+	 */
+	strftime_fmt = "%c";
+
+	/*
 	 * Set up rendering options, in particular, disable the pager, because
 	 * nobody wants to be prompted while watching the output of 'watch'.
 	 */
 	myopt.topt.pager = 0;
 
+	/*
+	 * If there's a title in the user configuration, make sure we have room
+	 * for it in the title buffer.  Allow 128 bytes for the timestamp plus 128
+	 * bytes for the rest.
+	 */
+	user_title = myopt.title;
+	title_len = (user_title ? strlen(user_title) : 0) + 256;
+	title = pg_malloc(title_len);
+
 	for (;;)
 	{
-		int			res;
 		time_t		timer;
+		char		timebuf[128];
 		long		i;
 
 		/*
-		 * Prepare title for output.  XXX would it be better to use the time
-		 * of completion of the command?
+		 * Prepare title for output.  Note that we intentionally include a
+		 * newline at the end of the title; this is somewhat historical but it
+		 * makes for reasonably nicely formatted output in simple cases.
 		 */
 		timer = time(NULL);
-		snprintf(title, sizeof(title), _("Watch every %lds\t%s"),
-				 sleep, asctime(localtime(&timer)));
+		strftime(timebuf, sizeof(timebuf), strftime_fmt, localtime(&timer));
+
+		if (user_title)
+			snprintf(title, title_len, _("%s\t%s (every %gs)\n"),
+					 user_title, timebuf, sleep);
+		else
+			snprintf(title, title_len, _("%s (every %gs)\n"),
+					 timebuf, sleep);
 		myopt.title = title;
 
 		/* Run the query and print out the results */
@@ -3056,10 +3230,8 @@ do_watch(PQExpBuffer query_buf, long sleep)
 		 * PSQLexecWatch handles the case where we can no longer repeat the
 		 * query, and returns 0 or -1.
 		 */
-		if (res == 0)
+		if (res <= 0)
 			break;
-		if (res == -1)
-			return false;
 
 		/*
 		 * Set up cancellation of 'watch' via SIGINT.  We redo this each time
@@ -3071,20 +3243,25 @@ do_watch(PQExpBuffer query_buf, long sleep)
 
 		/*
 		 * Enable 'watch' cancellations and wait a while before running the
-		 * query again.  Break the sleep into short intervals since pg_usleep
-		 * isn't interruptible on some platforms.
+		 * query again.  Break the sleep into short intervals (at most 1s)
+		 * since pg_usleep isn't interruptible on some platforms.
 		 */
 		sigint_interrupt_enabled = true;
-		for (i = 0; i < sleep; i++)
+		i = sleep_ms;
+		while (i > 0)
 		{
-			pg_usleep(1000000L);
+			long		s = Min(i, 1000L);
+
+			pg_usleep(s * 1000L);
 			if (cancel_pressed)
 				break;
+			i -= s;
 		}
 		sigint_interrupt_enabled = false;
 	}
 
-	return true;
+	pg_free(title);
+	return (res >= 0);
 }
 
 /*
@@ -3206,12 +3383,51 @@ get_create_object_cmd(EditableObjectType obj_type, Oid oid,
 			 * CREATE for ourselves.  We must fully qualify the view name to
 			 * ensure the right view gets replaced.  Also, check relation kind
 			 * to be sure it's a view.
+			 *
+			 * Starting with 9.2, views may have reloptions (security_barrier)
+			 * and from 9.4 onwards they may also have WITH [LOCAL|CASCADED]
+			 * CHECK OPTION.  These are not part of the view definition
+			 * returned by pg_get_viewdef() and so need to be retrieved
+			 * separately.  Materialized views (introduced in 9.3) may have
+			 * arbitrary storage parameter reloptions.
 			 */
-			printfPQExpBuffer(query,
-							  "SELECT nspname, relname, relkind, pg_catalog.pg_get_viewdef(c.oid, true) FROM "
-				 "pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n "
-							  "ON c.relnamespace = n.oid WHERE c.oid = %u",
-							  oid);
+			if (pset.sversion >= 90400)
+			{
+				printfPQExpBuffer(query,
+								  "SELECT nspname, relname, relkind, "
+								  "pg_catalog.pg_get_viewdef(c.oid, true), "
+								  "array_remove(array_remove(c.reloptions,'check_option=local'),'check_option=cascaded') AS reloptions, "
+								  "CASE WHEN 'check_option=local' = ANY (c.reloptions) THEN 'LOCAL'::text "
+								  "WHEN 'check_option=cascaded' = ANY (c.reloptions) THEN 'CASCADED'::text ELSE NULL END AS checkoption "
+								  "FROM pg_catalog.pg_class c "
+								  "LEFT JOIN pg_catalog.pg_namespace n "
+								"ON c.relnamespace = n.oid WHERE c.oid = %u",
+								  oid);
+			}
+			else if (pset.sversion >= 90200)
+			{
+				printfPQExpBuffer(query,
+								  "SELECT nspname, relname, relkind, "
+								  "pg_catalog.pg_get_viewdef(c.oid, true), "
+								  "c.reloptions AS reloptions, "
+								  "NULL AS checkoption "
+								  "FROM pg_catalog.pg_class c "
+								  "LEFT JOIN pg_catalog.pg_namespace n "
+								"ON c.relnamespace = n.oid WHERE c.oid = %u",
+								  oid);
+			}
+			else
+			{
+				printfPQExpBuffer(query,
+								  "SELECT nspname, relname, relkind, "
+								  "pg_catalog.pg_get_viewdef(c.oid, true), "
+								  "NULL AS reloptions, "
+								  "NULL AS checkoption "
+								  "FROM pg_catalog.pg_class c "
+								  "LEFT JOIN pg_catalog.pg_namespace n "
+								"ON c.relnamespace = n.oid WHERE c.oid = %u",
+								  oid);
+			}
 			break;
 	}
 
@@ -3236,6 +3452,8 @@ get_create_object_cmd(EditableObjectType obj_type, Oid oid,
 					char	   *relname = PQgetvalue(res, 0, 1);
 					char	   *relkind = PQgetvalue(res, 0, 2);
 					char	   *viewdef = PQgetvalue(res, 0, 3);
+					char	   *reloptions = PQgetvalue(res, 0, 4);
+					char	   *checkoption = PQgetvalue(res, 0, 5);
 
 					/*
 					 * If the backend ever supports CREATE OR REPLACE
@@ -3254,17 +3472,39 @@ get_create_object_cmd(EditableObjectType obj_type, Oid oid,
 							appendPQExpBufferStr(buf, "CREATE OR REPLACE VIEW ");
 							break;
 						default:
-							psql_error("%s.%s is not a view\n",
+							psql_error("\"%s.%s\" is not a view\n",
 									   nspname, relname);
 							result = false;
 							break;
 					}
 					appendPQExpBuffer(buf, "%s.", fmtId(nspname));
-					appendPQExpBuffer(buf, "%s AS\n", fmtId(relname));
-					appendPQExpBufferStr(buf, viewdef);
+					appendPQExpBufferStr(buf, fmtId(relname));
+
+					/* reloptions, if not an empty array "{}" */
+					if (reloptions != NULL && strlen(reloptions) > 2)
+					{
+						appendPQExpBufferStr(buf, "\n WITH (");
+						if (!appendReloptionsArray(buf, reloptions, "",
+												   pset.encoding,
+												   standard_strings()))
+						{
+							psql_error("could not parse reloptions array\n");
+							result = false;
+						}
+						appendPQExpBufferStr(buf, ")");
+					}
+
+					/* View definition from pg_get_viewdef (a SELECT query) */
+					appendPQExpBuffer(buf, " AS\n%s", viewdef);
+
 					/* Get rid of the semicolon that pg_get_viewdef appends */
 					if (buf->len > 0 && buf->data[buf->len - 1] == ';')
 						buf->data[--(buf->len)] = '\0';
+
+					/* WITH [LOCAL|CASCADED] CHECK OPTION */
+					if (checkoption && checkoption[0] != '\0')
+						appendPQExpBuffer(buf, "\n WITH %s CHECK OPTION",
+										  checkoption);
 				}
 				break;
 		}

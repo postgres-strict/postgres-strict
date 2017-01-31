@@ -117,21 +117,7 @@ sub setup_cluster
 
 	# Initialize master, data checksums are mandatory
 	$node_master = get_new_node('master');
-	$node_master->init;
-
-	# Custom parameters for master's postgresql.conf
-	$node_master->append_conf(
-		"postgresql.conf", qq(
-wal_level = hot_standby
-max_wal_senders = 2
-wal_keep_segments = 20
-max_wal_size = 200MB
-shared_buffers = 1MB
-wal_log_hints = on
-hot_standby = on
-autovacuum = off
-max_connections = 10
-));
+	$node_master->init(allows_streaming => 1);
 }
 
 sub start_master
@@ -147,7 +133,7 @@ sub create_standby
 	$node_standby = get_new_node('standby');
 	$node_master->backup('my_backup');
 	$node_standby->init_from_backup($node_master, 'my_backup');
-	my $connstr_master = $node_master->connstr('postgres');
+	my $connstr_master = $node_master->connstr();
 
 	$node_standby->append_conf(
 		"recovery.conf", qq(
@@ -175,12 +161,8 @@ sub promote_standby
 	  or die "Timed out while waiting for standby to receive and write WAL";
 
 	# Now promote slave and insert some new data on master, this will put
-	# the master out-of-sync with the standby. Wait until the standby is
-	# out of recovery mode, and is ready to accept read-write connections.
-	system_or_bail('pg_ctl', '-w', '-D', $node_standby->data_dir, 'promote');
-	$node_standby->poll_query_until('postgres',
-		"SELECT NOT pg_is_in_recovery()")
-	  or die "Timed out while waiting for promotion of standby";
+	# the master out-of-sync with the standby.
+	$node_standby->promote;
 
 	# Force a checkpoint after the promotion. pg_rewind looks at the control
 	# file to determine what timeline the server is on, and that isn't updated

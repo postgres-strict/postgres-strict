@@ -37,12 +37,9 @@ sub _new
 	  unless exists $options->{float8byval};
 	die "float8byval not permitted on 32 bit platforms"
 	  if $options->{float8byval} && $bits == 32;
-	if ($options->{xml})
+	if ($options->{xslt} && !$options->{xml})
 	{
-		if (!($options->{xslt} && $options->{iconv}))
-		{
-			die "XML requires both XSLT and ICONV\n";
-		}
+		die "XSLT requires XML\n";
 	}
 	$options->{blocksize} = 8
 	  unless $options->{blocksize};    # undef or 0 means default
@@ -131,12 +128,12 @@ sub GenerateFiles
 		if (/^AC_INIT\(\[PostgreSQL\], \[([^\]]+)\]/)
 		{
 			$self->{strver} = $1;
-			if ($self->{strver} !~ /^(\d+)\.(\d+)(?:\.(\d+))?/)
+			if ($self->{strver} !~ /^(\d+)(?:\.(\d+))?/)
 			{
 				confess "Bad format of version: $self->{strver}\n";
 			}
-			$self->{numver} = sprintf("%d%02d%02d", $1, $2, $3 ? $3 : 0);
-			$self->{majorver} = sprintf("%d.%d", $1, $2);
+			$self->{numver} = sprintf("%d%04d", $1, $2 ? $2 : 0);
+			$self->{majorver} = sprintf("%d", $1);
 		}
 	}
 	close(C);
@@ -271,7 +268,7 @@ s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY
 	if (IsNewer(
 			'src/backend/utils/fmgrtab.c', 'src/include/catalog/pg_proc.h'))
 	{
-		print "Generating fmgrtab.c and fmgroids.h...\n";
+		print "Generating fmgrtab.c, fmgroids.h, fmgrprotos.h...\n";
 		chdir('src/backend/utils');
 		system(
 "perl -I ../catalog Gen_fmgrtab.pl ../../../src/include/catalog/pg_proc.h");
@@ -286,7 +283,16 @@ s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY
 	}
 
 	if (IsNewer(
-			'src/include/storage/lwlocknames.h', 'src/backend/storage/lmgr/lwlocknames.txt'))
+			'src/include/utils/fmgrprotos.h',
+			'src/backend/utils/fmgrprotos.h'))
+	{
+		copyFile('src/backend/utils/fmgrprotos.h',
+			'src/include/utils/fmgrprotos.h');
+	}
+
+	if (IsNewer(
+			'src/include/storage/lwlocknames.h',
+			'src/backend/storage/lmgr/lwlocknames.txt'))
 	{
 		print "Generating lwlocknames.c and lwlocknames.h...\n";
 		chdir('src/backend/storage/lmgr');
@@ -297,13 +303,13 @@ s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY
 			'src/include/storage/lwlocknames.h',
 			'src/backend/storage/lmgr/lwlocknames.h'))
 	{
-		copyFile('src/backend/storage/lmgr/lwlocknames.h',
+		copyFile(
+			'src/backend/storage/lmgr/lwlocknames.h',
 			'src/include/storage/lwlocknames.h');
 	}
 
 	if (IsNewer(
-			'src/include/dynloader.h',
-			'src/backend/port/dynloader/win32.h'))
+			'src/include/dynloader.h', 'src/backend/port/dynloader/win32.h'))
 	{
 		copyFile('src/backend/port/dynloader/win32.h',
 			'src/include/dynloader.h');
@@ -313,7 +319,7 @@ s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY
 	{
 		print "Generating probes.h...\n";
 		system(
-'psed -f src/backend/utils/Gen_dummy_probes.sed src/backend/utils/probes.d > src/include/utils/probes.h'
+'perl src/backend/utils/Gen_dummy_probes.pl src/backend/utils/probes.d > src/include/utils/probes.h'
 		);
 	}
 
@@ -347,6 +353,16 @@ s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY
 		print "Generating plerrcodes.h...\n";
 		system(
 'perl src/pl/plpgsql/src/generate-plerrcodes.pl src/backend/utils/errcodes.txt > src/pl/plpgsql/src/plerrcodes.h'
+		);
+	}
+
+	if ($self->{options}->{tcl}
+		&& IsNewer(
+			'src/pl/tcl/pltclerrcodes.h', 'src/backend/utils/errcodes.txt'))
+	{
+		print "Generating pltclerrcodes.h...\n";
+		system(
+'perl src/pl/tcl/generate-pltclerrcodes.pl src/backend/utils/errcodes.txt > src/pl/tcl/pltclerrcodes.h'
 		);
 	}
 
@@ -544,6 +560,11 @@ sub AddProject
 		$proj->AddIncludeDir($self->{options}->{xslt} . '\include');
 		$proj->AddLibrary($self->{options}->{xslt} . '\lib\libxslt.lib');
 	}
+	if ($self->{options}->{uuid})
+	{
+		$proj->AddIncludeDir($self->{options}->{uuid} . '\include');
+		$proj->AddLibrary($self->{options}->{uuid} . '\lib\uuid.lib');
+	}
 	return $proj;
 }
 
@@ -642,8 +663,9 @@ sub GetFakeConfigure
 	$cfg .= ' --enable-cassert' if ($self->{options}->{asserts});
 	$cfg .= ' --enable-integer-datetimes'
 	  if ($self->{options}->{integer_datetimes});
-	$cfg .= ' --enable-nls' if ($self->{options}->{nls});
-	$cfg .= ' --with-ldap'  if ($self->{options}->{ldap});
+	$cfg .= ' --enable-nls'       if ($self->{options}->{nls});
+	$cfg .= ' --enable-tap-tests' if ($self->{options}->{tap_tests});
+	$cfg .= ' --with-ldap'        if ($self->{options}->{ldap});
 	$cfg .= ' --without-zlib' unless ($self->{options}->{zlib});
 	$cfg .= ' --with-extra-version' if ($self->{options}->{extraver});
 	$cfg .= ' --with-openssl'       if ($self->{options}->{openssl});
@@ -773,6 +795,32 @@ sub new
 	$self->{vcver}                      = '12.00';
 	$self->{visualStudioName}           = 'Visual Studio 2013';
 	$self->{VisualStudioVersion}        = '12.0.21005.1';
+	$self->{MinimumVisualStudioVersion} = '10.0.40219.1';
+
+	return $self;
+}
+
+package VS2015Solution;
+
+#
+# Package that encapsulates a Visual Studio 2015 solution file
+#
+
+use Carp;
+use strict;
+use warnings;
+use base qw(Solution);
+
+sub new
+{
+	my $classname = shift;
+	my $self      = $classname->SUPER::_new(@_);
+	bless($self, $classname);
+
+	$self->{solutionFileVersion}        = '12.00';
+	$self->{vcver}                      = '14.00';
+	$self->{visualStudioName}           = 'Visual Studio 2015';
+	$self->{VisualStudioVersion}        = '14.0.24730.2';
 	$self->{MinimumVisualStudioVersion} = '10.0.40219.1';
 
 	return $self;

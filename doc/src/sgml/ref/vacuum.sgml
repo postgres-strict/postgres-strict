@@ -21,7 +21,7 @@ PostgreSQL documentation
 
  <refsynopsisdiv>
 <synopsis>
-VACUUM [ ( { FULL | FREEZE | VERBOSE | ANALYZE } [, ...] ) ] [ <replaceable class="PARAMETER">table_name</replaceable> [ (<replaceable class="PARAMETER">column_name</replaceable> [, ...] ) ] ]
+VACUUM [ ( { FULL | FREEZE | VERBOSE | ANALYZE | DISABLE_PAGE_SKIPPING } [, ...] ) ] [ <replaceable class="PARAMETER">table_name</replaceable> [ (<replaceable class="PARAMETER">column_name</replaceable> [, ...] ) ] ]
 VACUUM [ FULL ] [ FREEZE ] [ VERBOSE ] [ <replaceable class="PARAMETER">table_name</replaceable> ]
 VACUUM [ FULL ] [ FREEZE ] [ VERBOSE ] ANALYZE [ <replaceable class="PARAMETER">table_name</replaceable> [ (<replaceable class="PARAMETER">column_name</replaceable> [, ...] ) ] ]
 </synopsis>
@@ -125,6 +125,25 @@ VACUUM [ FULL ] [ FREEZE ] [ VERBOSE ] ANALYZE [ <replaceable class="PARAMETER">
      <para>
       Updates statistics used by the planner to determine the most
       efficient way to execute a query.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><literal>DISABLE_PAGE_SKIPPING</literal></term>
+    <listitem>
+     <para>
+      Normally, <command>VACUUM</> will skip pages based on the <link
+      linkend="vacuum-for-visibility-map">visibility map</>.  Pages where
+      all tuples are known to be frozen can always be skipped, and those
+      where all tuples are known to be visible to all transactions may be
+      skipped except when performing an aggressive vacuum.  Furthermore,
+      except when performing an aggressive vacuum, some pages may be skipped
+      in order to avoid waiting for other sessions to finish using them.
+      This option disables all page-skipping behavior, and is intended to
+      be used only the contents of the visibility map are thought to
+      be suspect, which should happen only if there is a hardware or software
+      issue causing database corruption.
      </para>
     </listitem>
    </varlistentry>
@@ -234,27 +253,27 @@ INFO:  vacuuming "public.onek"
 INFO:  index "onek_unique1" now contains 1000 tuples in 14 pages
 DETAIL:  3000 index tuples were removed.
 0 index pages have been deleted, 0 are currently reusable.
-CPU 0.01s/0.08u sec elapsed 0.18 sec.
+CPU: user: 0.08 s, system: 0.01 s, elapsed: 0.18 s.
 INFO:  index "onek_unique2" now contains 1000 tuples in 16 pages
 DETAIL:  3000 index tuples were removed.
 0 index pages have been deleted, 0 are currently reusable.
-CPU 0.00s/0.07u sec elapsed 0.23 sec.
+CPU: user: 0.07 s, system: 0.00 s, elapsed: 0.23 s.
 INFO:  index "onek_hundred" now contains 1000 tuples in 13 pages
 DETAIL:  3000 index tuples were removed.
 0 index pages have been deleted, 0 are currently reusable.
-CPU 0.01s/0.08u sec elapsed 0.17 sec.
+CPU: user: 0.08 s, system: 0.01 s, elapsed: 0.17 s.
 INFO:  index "onek_stringu1" now contains 1000 tuples in 48 pages
 DETAIL:  3000 index tuples were removed.
 0 index pages have been deleted, 0 are currently reusable.
-CPU 0.01s/0.09u sec elapsed 0.59 sec.
+CPU: user: 0.09 s, system: 0.01 s, elapsed: 0.59 s.
 INFO:  "onek": removed 3000 tuples in 108 pages
-DETAIL:  CPU 0.01s/0.06u sec elapsed 0.07 sec.
+DETAIL:  CPU: user: 0.06 s, system: 0.01 s, elapsed: 0.07 s.
 INFO:  "onek": found 3000 removable, 1000 nonremovable tuples in 143 pages
 DETAIL:  0 dead tuples cannot be removed yet.
 There were 0 unused item pointers.
 Skipped 0 pages due to buffer pins.
 0 pages are entirely empty.
-CPU 0.07s/0.39u sec elapsed 1.56 sec.
+CPU: user: 0.39 s, system: 0.07 s, elapsed: 1.56 s.
 INFO:  analyzing "public.onek"
 INFO:  "onek": 36 pages, 1000 rows sampled, 1000 estimated total rows
 VACUUM

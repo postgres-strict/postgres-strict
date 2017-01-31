@@ -54,11 +54,13 @@
    &alterOperatorClass;
    &alterOperatorFamily;
    &alterPolicy;
+   &alterPublication;
    &alterRole;
    &alterRule;
    &alterSchema;
    &alterSequence;
    &alterServer;
+   &alterSubscription;
    &alterSystem;
    &alterTable;
    &alterTableSpace;
@@ -80,6 +82,7 @@
    &commit;
    &commitPrepared;
    &copyTable;
+   &createAccessMethod;
    &createAggregate;
    &createCast;
    &createCollation;
@@ -99,11 +102,13 @@
    &createOperatorClass;
    &createOperatorFamily;
    &createPolicy;
+   &createPublication;
    &createRole;
    &createRule;
    &createSchema;
    &createSequence;
    &createServer;
+   &createSubscription;
    &createTable;
    &createTableAs;
    &createTableSpace;
@@ -122,6 +127,7 @@
    &delete;
    &discard;
    &do;
+   &dropAccessMethod;
    &dropAggregate;
    &dropCast;
    &dropCollation;
@@ -142,11 +148,13 @@
    &dropOperatorFamily;
    &dropOwned;
    &dropPolicy;
+   &dropPublication;
    &dropRole;
    &dropRule;
    &dropSchema;
    &dropSequence;
    &dropServer;
+   &dropSubscription;
    &dropTable;
    &dropTableSpace;
    &dropTSConfig;

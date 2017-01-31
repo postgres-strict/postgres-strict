@@ -2,7 +2,7 @@
  * brin_xlog.c
  *		XLog replay routines for BRIN indexes
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -47,7 +47,7 @@ brin_xlog_insert_update(XLogReaderState *record,
 {
 	XLogRecPtr	lsn = record->EndRecPtr;
 	Buffer		buffer;
-	BlockNumber	regpgno;
+	BlockNumber regpgno;
 	Page		page;
 	XLogRedoAction action;
 
@@ -148,10 +148,8 @@ brin_xlog_update(XLogReaderState *record)
 		page = (Page) BufferGetPage(buffer);
 
 		offnum = xlrec->oldOffnum;
-		if (PageGetMaxOffsetNumber(page) + 1 < offnum)
-			elog(PANIC, "brin_xlog_update: invalid max offset number");
 
-		PageIndexDeleteNoCompact(page, &offnum, 1);
+		PageIndexTupleDeleteNoCompact(page, offnum);
 
 		PageSetLSN(page, lsn);
 		MarkBufferDirty(buffer);
@@ -189,13 +187,9 @@ brin_xlog_samepage_update(XLogReaderState *record)
 		page = (Page) BufferGetPage(buffer);
 
 		offnum = xlrec->offnum;
-		if (PageGetMaxOffsetNumber(page) + 1 < offnum)
-			elog(PANIC, "brin_xlog_samepage_update: invalid max offset number");
 
-		PageIndexDeleteNoCompact(page, &offnum, 1);
-		offnum = PageAddItem(page, (Item) brintuple, tuplen, offnum, true, false);
-		if (offnum == InvalidOffsetNumber)
-			elog(PANIC, "brin_xlog_samepage_update: failed to add tuple");
+		if (!PageIndexTupleOverwrite(page, offnum, (Item) brintuple, tuplen))
+			elog(PANIC, "brin_xlog_samepage_update: failed to replace tuple");
 
 		PageSetLSN(page, lsn);
 		MarkBufferDirty(buffer);

@@ -813,13 +813,13 @@ lexescape(struct vars * v)
 			break;
 		case CHR('u'):
 			c = lexdigits(v, 16, 4, 4);
-			if (ISERR())
+			if (ISERR() || !CHR_IS_IN_RANGE(c))
 				FAILW(REG_EESCAPE);
 			RETV(PLAIN, c);
 			break;
 		case CHR('U'):
 			c = lexdigits(v, 16, 8, 8);
-			if (ISERR())
+			if (ISERR() || !CHR_IS_IN_RANGE(c))
 				FAILW(REG_EESCAPE);
 			RETV(PLAIN, c);
 			break;
@@ -837,7 +837,7 @@ lexescape(struct vars * v)
 		case CHR('x'):
 			NOTE(REG_UUNPORT);
 			c = lexdigits(v, 16, 1, 255);		/* REs >255 long outside spec */
-			if (ISERR())
+			if (ISERR() || !CHR_IS_IN_RANGE(c))
 				FAILW(REG_EESCAPE);
 			RETV(PLAIN, c);
 			break;
@@ -870,7 +870,7 @@ lexescape(struct vars * v)
 			if (v->now == save || ((int) c > 0 && (int) c <= v->nsubexp))
 			{
 				NOTE(REG_UBACKREF);
-				RETV(BACKREF, (chr) c);
+				RETV(BACKREF, c);
 			}
 			/* oops, doesn't look like it's a backref after all... */
 			v->now = save;
@@ -899,6 +899,9 @@ lexescape(struct vars * v)
 
 /*
  * lexdigits - slurp up digits and return chr value
+ *
+ * This does not account for overflow; callers should range-check the result
+ * if maxlen is large enough to make that possible.
  */
 static chr						/* chr value; errors signalled via ERR */
 lexdigits(struct vars * v,
@@ -983,10 +986,8 @@ lexdigits(struct vars * v,
  */
 static int						/* 1 normal, 0 failure */
 brenext(struct vars * v,
-		chr pc)
+		chr c)
 {
-	chr			c = (chr) pc;
-
 	switch (c)
 	{
 		case CHR('*'):
@@ -1150,7 +1151,7 @@ chrnamed(struct vars * v,
 		 const chr *endp,		/* just past end of name */
 		 chr lastresort)		/* what to return if name lookup fails */
 {
-	celt		c;
+	chr			c;
 	int			errsave;
 	int			e;
 	struct cvec *cv;
@@ -1162,10 +1163,10 @@ chrnamed(struct vars * v,
 	v->err = errsave;
 
 	if (e != 0)
-		return (chr) lastresort;
+		return lastresort;
 
 	cv = range(v, c, c, 0);
 	if (cv->nchrs == 0)
-		return (chr) lastresort;
+		return lastresort;
 	return cv->chrs[0];
 }

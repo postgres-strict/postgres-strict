@@ -1,7 +1,7 @@
 # contrib/pgcrypto/Makefile
 
 INT_SRCS = md5.c sha1.c sha2.c internal.c internal-sha2.c blf.c rijndael.c \
-		fortuna.c random.c pgp-mpi-internal.c imath.c
+		pgp-mpi-internal.c imath.c
 INT_TESTS = sha2
 
 OSSL_SRCS = openssl.c pgp-mpi-openssl.c
@@ -26,8 +26,8 @@ MODULE_big	= pgcrypto
 OBJS		= $(SRCS:.c=.o) $(WIN32RES)
 
 EXTENSION = pgcrypto
-DATA = pgcrypto--1.2.sql pgcrypto--1.1--1.2.sql pgcrypto--1.0--1.1.sql \
-	pgcrypto--unpackaged--1.0.sql
+DATA = pgcrypto--1.3.sql pgcrypto--1.2--1.3.sql pgcrypto--1.1--1.2.sql \
+	pgcrypto--1.0--1.1.sql pgcrypto--unpackaged--1.0.sql
 PGFILEDESC = "pgcrypto - cryptographic functions"
 
 REGRESS = init md5 sha1 hmac-md5 hmac-sha1 blowfish rijndael \

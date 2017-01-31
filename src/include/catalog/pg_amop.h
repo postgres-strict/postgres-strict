@@ -30,7 +30,7 @@
  * intentional denormalization of the catalogs to buy lookup speed.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_amop.h
@@ -573,8 +573,6 @@ DATA(insert (	2040   1114 1114 1 s 2060 405 0 ));
 DATA(insert (	2222   16 16 1 s   91 405 0 ));
 /* bytea_ops */
 DATA(insert (	2223   17 17 1 s 1955 405 0 ));
-/* int2vector_ops */
-DATA(insert (	2224   22 22 1 s	386 405 0 ));
 /* xid_ops */
 DATA(insert (	2225   28 28 1 s	352 405 0 ));
 /* cid_ops */
@@ -673,8 +671,7 @@ DATA(insert (	2595   718 718 14 s 2864 783 0 ));
 DATA(insert (	2595   718 600 15 o 3291 783 1970 ));
 
 /*
- * gin array_ops (these anyarray operators are used with all the opclasses
- * of the family)
+ * gin array_ops
  */
 DATA(insert (	2745   2277 2277 1 s 2750 2742 0 ));
 DATA(insert (	2745   2277 2277 2 s 2751 2742 0 ));
@@ -833,6 +830,22 @@ DATA(insert (	3474   3831 2283 16 s	3889 4000 0 ));
 DATA(insert (	3474   3831 3831 18 s	3882 4000 0 ));
 
 /*
+ * SP-GiST box_ops
+ */
+DATA(insert (	5000	603  603  1 s	 493	4000 0 ));
+DATA(insert (	5000	603  603  2 s	 494	4000 0 ));
+DATA(insert (	5000	603  603  3 s	 500	4000 0 ));
+DATA(insert (	5000	603  603  4 s	 495	4000 0 ));
+DATA(insert (	5000	603  603  5 s	 496	4000 0 ));
+DATA(insert (	5000	603  603  6 s	 499	4000 0 ));
+DATA(insert (	5000	603  603  7 s	 498	4000 0 ));
+DATA(insert (	5000	603  603  8 s	 497	4000 0 ));
+DATA(insert (	5000	603  603  9 s	2571	4000 0 ));
+DATA(insert (	5000	603  603 10 s	2570	4000 0 ));
+DATA(insert (	5000	603  603 11 s	2573	4000 0 ));
+DATA(insert (	5000	603  603 12 s	2572	4000 0 ));
+
+/*
  * GiST inet_ops
  */
 DATA(insert (	3550	869 869 3 s		3552 783 0 ));
@@ -846,6 +859,21 @@ DATA(insert (	3550	869 869 24 s	931 783 0 ));
 DATA(insert (	3550	869 869 25 s	932 783 0 ));
 DATA(insert (	3550	869 869 26 s	933 783 0 ));
 DATA(insert (	3550	869 869 27 s	934 783 0 ));
+
+/*
+ * SP-GiST inet_ops
+ */
+DATA(insert (	3794	869 869 3 s		3552 4000 0 ));
+DATA(insert (	3794	869 869 18 s	1201 4000 0 ));
+DATA(insert (	3794	869 869 19 s	1202 4000 0 ));
+DATA(insert (	3794	869 869 20 s	1203 4000 0 ));
+DATA(insert (	3794	869 869 21 s	1204 4000 0 ));
+DATA(insert (	3794	869 869 22 s	1205 4000 0 ));
+DATA(insert (	3794	869 869 23 s	1206 4000 0 ));
+DATA(insert (	3794	869 869 24 s	931 4000 0 ));
+DATA(insert (	3794	869 869 25 s	932 4000 0 ));
+DATA(insert (	3794	869 869 26 s	933 4000 0 ));
+DATA(insert (	3794	869 869 27 s	934 4000 0 ));
 
 /* BRIN opclasses */
 /* minmax bytea */

@@ -3,7 +3,7 @@
  * nodeIndexscan.c
  *	  Routines to support indexed scans of relations
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -336,8 +336,7 @@ EvalOrderByExpressions(IndexScanState *node, ExprContext *econtext)
 
 		node->iss_OrderByValues[i] = ExecEvalExpr(orderby,
 												  econtext,
-												  &node->iss_OrderByNulls[i],
-												  NULL);
+												  &node->iss_OrderByNulls[i]);
 		i++;
 	}
 
@@ -590,8 +589,7 @@ ExecIndexEvalRuntimeKeys(ExprContext *econtext,
 		 */
 		scanvalue = ExecEvalExpr(key_expr,
 								 econtext,
-								 &isNull,
-								 NULL);
+								 &isNull);
 		if (isNull)
 		{
 			scan_key->sk_argument = scanvalue;
@@ -648,8 +646,7 @@ ExecIndexEvalArrayKeys(ExprContext *econtext,
 		 */
 		arraydatum = ExecEvalExpr(array_expr,
 								  econtext,
-								  &isNull,
-								  NULL);
+								  &isNull);
 		if (isNull)
 		{
 			result = false;
@@ -837,8 +834,6 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 	 */
 	ExecAssignExprContext(estate, &indexstate->ss.ps);
 
-	indexstate->ss.ps.ps_TupFromTlist = false;
-
 	/*
 	 * initialize child expressions
 	 *
@@ -967,9 +962,20 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 			Oid			orderbyop = lfirst_oid(lco);
 			Node	   *orderbyexpr = (Node *) lfirst(lcx);
 			Oid			orderbyType = exprType(orderbyexpr);
+			Oid			orderbyColl = exprCollation(orderbyexpr);
+			SortSupport orderbysort = &indexstate->iss_SortSupport[i];
 
-			PrepareSortSupportFromOrderingOp(orderbyop,
-											 &indexstate->iss_SortSupport[i]);
+			/* Initialize sort support */
+			orderbysort->ssup_cxt = CurrentMemoryContext;
+			orderbysort->ssup_collation = orderbyColl;
+			/* See cmp_orderbyvals() comments on NULLS LAST */
+			orderbysort->ssup_nulls_first = false;
+			/* ssup_attno is unused here and elsewhere */
+			orderbysort->ssup_attno = 0;
+			/* No abbreviation */
+			orderbysort->abbreviate = false;
+			PrepareSortSupportFromOrderingOp(orderbyop, orderbysort);
+
 			get_typlenbyval(orderbyType,
 							&indexstate->iss_OrderByTypLens[i],
 							&indexstate->iss_OrderByTypByVals[i]);

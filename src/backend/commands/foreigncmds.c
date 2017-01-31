@@ -3,7 +3,7 @@
  * foreigncmds.c
  *	  foreign-data wrapper/server creation/manipulation commands
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -486,8 +486,8 @@ lookup_fdw_handler_func(DefElem *handler)
 	if (get_func_rettype(handlerOid) != FDW_HANDLEROID)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("function %s must return type \"fdw_handler\"",
-						NameListToString((List *) handler->arg))));
+				 errmsg("function %s must return type %s",
+				   NameListToString((List *) handler->arg), "fdw_handler")));
 
 	return handlerOid;
 }
@@ -1572,7 +1572,9 @@ ImportForeignSchema(ImportForeignSchemaStmt *stmt)
 		 */
 		foreach(lc2, raw_parsetree_list)
 		{
-			CreateForeignTableStmt *cstmt = lfirst(lc2);
+			RawStmt    *rs = castNode(RawStmt, lfirst(lc2));
+			CreateForeignTableStmt *cstmt = (CreateForeignTableStmt *) rs->stmt;
+			PlannedStmt *pstmt;
 
 			/*
 			 * Because we only allow CreateForeignTableStmt, we can skip parse
@@ -1593,8 +1595,16 @@ ImportForeignSchema(ImportForeignSchemaStmt *stmt)
 			/* Ensure creation schema is the one given in IMPORT statement */
 			cstmt->base.relation->schemaname = pstrdup(stmt->local_schema);
 
+			/* No planning needed, just make a wrapper PlannedStmt */
+			pstmt = makeNode(PlannedStmt);
+			pstmt->commandType = CMD_UTILITY;
+			pstmt->canSetTag = false;
+			pstmt->utilityStmt = (Node *) cstmt;
+			pstmt->stmt_location = rs->stmt_location;
+			pstmt->stmt_len = rs->stmt_len;
+
 			/* Execute statement */
-			ProcessUtility((Node *) cstmt,
+			ProcessUtility(pstmt,
 						   cmd,
 						   PROCESS_UTILITY_SUBCOMMAND, NULL,
 						   None_Receiver, NULL);

@@ -451,13 +451,13 @@ $$ LANGUAGE plpythonu;
   <para>
    SQL array values are passed into PL/Python as a Python list.  To
    return an SQL array value out of a PL/Python function, return a
-   Python sequence, for example a list or tuple:
+   Python list:
 
 <programlisting>
 CREATE FUNCTION return_arr()
   RETURNS int[]
 AS $$
-return (1, 2, 3, 4, 5)
+return [1, 2, 3, 4, 5]
 $$ LANGUAGE plpythonu;
 
 SELECT return_arr();
@@ -467,6 +467,34 @@ SELECT return_arr();
 (1 row)
 </programlisting>
 
+   Multidimensional arrays are passed into PL/Python as nested Python lists.
+   A 2-dimensional array is a list of lists, for example. When returning
+   a multi-dimensional SQL array out of a PL/Python function, the inner
+   lists at each level must all be of the same size. For example:
+
+<programlisting>
+CREATE FUNCTION test_type_conversion_array_int4(x int4[]) RETURNS int4[] AS $$
+plpy.info(x, type(x))
+return x
+$$ LANGUAGE plpythonu;
+
+SELECT * FROM test_type_conversion_array_int4(ARRAY[[1,2,3],[4,5,6]]);
+INFO:  ([[1, 2, 3], [4, 5, 6]], &lt;type 'list'&gt;)
+ test_type_conversion_array_int4 
+---------------------------------
+ {{1,2,3},{4,5,6}}
+(1 row)
+</programlisting>
+
+   Other Python sequences, like tuples, are also accepted for
+   backwards-compatibility with PostgreSQL versions 9.6 and below, when
+   multi-dimensional arrays were not supported. However, they are always
+   treated as one-dimensional arrays, because they are ambiguous with
+   composite types. For the same reason, when a composite type is used in a
+   multi-dimensional array, it must be represented by a tuple, rather than a
+   list.
+  </para>
+  <para>
    Note that in Python, strings are sequences, which can have
    undesirable effects that might be familiar to Python programmers:
 
@@ -541,13 +569,18 @@ CREATE TYPE named_value AS (
 CREATE FUNCTION make_pair (name text, value integer)
   RETURNS named_value
 AS $$
-  return [ name, value ]
-  # or alternatively, as tuple: return ( name, value )
+  return ( name, value )
+  # or alternatively, as tuple: return [ name, value ]
 $$ LANGUAGE plpythonu;
 </programlisting>
 
        To return a SQL null for any column, insert <symbol>None</symbol> at
        the corresponding position.
+      </para>
+      <para>
+       When an array of composite types is returned, it cannot be returned as a list,
+       because it is ambiguous whether the Python list represents a composite type,
+       or another array dimension.
       </para>
      </listitem>
     </varlistentry>
@@ -696,19 +729,6 @@ AS $$
 $$ LANGUAGE plpythonu;
 </programlisting>
 
-       <warning>
-        <para>
-         Due to Python
-         <ulink url="http://bugs.python.org/issue1483133">bug #1483133</ulink>,
-         some debug versions of Python 2.4
-         (configured and compiled with option <literal>--with-pydebug</literal>)
-         are known to crash the <productname>PostgreSQL</productname> server
-         when using an iterator to return a set result.
-         Unpatched versions of Fedora 4 contain this bug.
-         It does not happen in production versions of Python or on patched
-         versions of Fedora 4.
-        </para>
-       </warning>
       </para>
      </listitem>
     </varlistentry>
@@ -1341,29 +1361,70 @@ $$ LANGUAGE plpythonu;
   <title>Utility Functions</title>
   <para>
    The <literal>plpy</literal> module also provides the functions
-   <literal>plpy.debug(<replaceable>msg</>)</literal>,
-   <literal>plpy.log(<replaceable>msg</>)</literal>,
-   <literal>plpy.info(<replaceable>msg</>)</literal>,
-   <literal>plpy.notice(<replaceable>msg</>)</literal>,
-   <literal>plpy.warning(<replaceable>msg</>)</literal>,
-   <literal>plpy.error(<replaceable>msg</>)</literal>, and
-   <literal>plpy.fatal(<replaceable>msg</>)</literal>.<indexterm><primary>elog</><secondary>in PL/Python</></indexterm>
-   <function>plpy.error</function> and
-   <function>plpy.fatal</function> actually raise a Python exception
-   which, if uncaught, propagates out to the calling query, causing
-   the current transaction or subtransaction to be aborted.
-   <literal>raise plpy.Error(<replaceable>msg</>)</literal> and
+   <simplelist>
+    <member><literal>plpy.debug(<replaceable>msg, **kwargs</>)</literal></member>
+    <member><literal>plpy.log(<replaceable>msg, **kwargs</>)</literal></member>
+    <member><literal>plpy.info(<replaceable>msg, **kwargs</>)</literal></member>
+    <member><literal>plpy.notice(<replaceable>msg, **kwargs</>)</literal></member>
+    <member><literal>plpy.warning(<replaceable>msg, **kwargs</>)</literal></member>
+    <member><literal>plpy.error(<replaceable>msg, **kwargs</>)</literal></member>
+    <member><literal>plpy.fatal(<replaceable>msg, **kwargs</>)</literal></member>
+   </simplelist>
+   <indexterm><primary>elog</><secondary>in PL/Python</></indexterm>
+   <function>plpy.error</function> and <function>plpy.fatal</function>
+   actually raise a Python exception which, if uncaught, propagates out to
+   the calling query, causing the current transaction or subtransaction to
+   be aborted.  <literal>raise plpy.Error(<replaceable>msg</>)</literal> and
    <literal>raise plpy.Fatal(<replaceable>msg</>)</literal> are
-   equivalent to calling
-   <function>plpy.error</function> and
-   <function>plpy.fatal</function>, respectively.
-   The other functions only generate messages of different
-   priority levels.
+   equivalent to calling <literal>plpy.error(<replaceable>msg</>)</literal> and
+   <literal>plpy.fatal(<replaceable>msg</>)</literal>, respectively but
+   the <literal>raise</literal> form does not allow passing keyword arguments.
+   The other functions only generate messages of different priority levels.
    Whether messages of a particular priority are reported to the client,
    written to the server log, or both is controlled by the
    <xref linkend="guc-log-min-messages"> and
    <xref linkend="guc-client-min-messages"> configuration
    variables. See <xref linkend="runtime-config"> for more information.
+  </para>
+
+  <para>
+   The <replaceable>msg</> argument is given as a positional argument.  For
+   backward compatibility, more than one positional argument can be given. In
+   that case, the string representation of the tuple of positional arguments
+   becomes the message reported to the client.
+  </para>
+
+  <para>
+   The following keyword-only arguments are accepted:
+   <simplelist>
+    <member><literal>detail</literal></member>
+    <member><literal>hint</literal></member>
+    <member><literal>sqlstate</literal></member>
+    <member><literal>schema_name</literal></member>
+    <member><literal>table_name</literal></member>
+    <member><literal>column_name</literal></member>
+    <member><literal>datatype_name</literal></member>
+    <member><literal>constraint_name</literal></member>
+   </simplelist>
+   The string representation of the objects passed as keyword-only arguments
+   is used to enrich the messages reported to the client. For example:
+
+<programlisting>
+CREATE FUNCTION raise_custom_exception() RETURNS void AS $$
+plpy.error("custom exception message",
+           detail="some info about exception",
+           hint="hint for users")
+$$ LANGUAGE plpythonu;
+
+=# SELECT raise_custom_exception();
+ERROR:  plpy.Error: custom exception message
+DETAIL:  some info about exception
+HINT:  hint for users
+CONTEXT:  Traceback (most recent call last):
+  PL/Python function "raise_custom_exception", line 4, in &lt;module&gt;
+    hint="hint for users")
+PL/Python function "raise_custom_exception"
+</programlisting>
   </para>
 
   <para>

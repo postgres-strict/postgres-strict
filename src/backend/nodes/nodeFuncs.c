@@ -3,7 +3,7 @@
  * nodeFuncs.c
  *		Various general-purpose manipulations of Node trees
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -27,6 +27,7 @@
 
 static bool expression_returns_set_walker(Node *node, void *context);
 static int	leftmostLoc(int loc1, int loc2);
+static bool fix_opfuncids_walker(Node *node, void *context);
 static bool planstate_walk_subplans(List *plans, bool (*walker) (),
 												void *context);
 static bool planstate_walk_members(List *plans, PlanState **planstates,
@@ -216,6 +217,9 @@ exprType(const Node *expr)
 			break;
 		case T_MinMaxExpr:
 			type = ((const MinMaxExpr *) expr)->minmaxtype;
+			break;
+		case T_SQLValueFunction:
+			type = ((const SQLValueFunction *) expr)->type;
 			break;
 		case T_XmlExpr:
 			if (((const XmlExpr *) expr)->op == IS_DOCUMENT)
@@ -478,6 +482,8 @@ exprTypmod(const Node *expr)
 				return typmod;
 			}
 			break;
+		case T_SQLValueFunction:
+			return ((const SQLValueFunction *) expr)->typmod;
 		case T_CoerceToDomain:
 			return ((const CoerceToDomain *) expr)->resulttypmod;
 		case T_CoerceToDomainValue:
@@ -717,6 +723,8 @@ expression_returns_set_walker(Node *node, void *context)
 		return false;
 	if (IsA(node, MinMaxExpr))
 		return false;
+	if (IsA(node, SQLValueFunction))
+		return false;
 	if (IsA(node, XmlExpr))
 		return false;
 
@@ -881,6 +889,9 @@ exprCollation(const Node *expr)
 			break;
 		case T_MinMaxExpr:
 			coll = ((const MinMaxExpr *) expr)->minmaxcollid;
+			break;
+		case T_SQLValueFunction:
+			coll = InvalidOid;	/* all cases return non-collatable types */
 			break;
 		case T_XmlExpr:
 
@@ -1089,6 +1100,9 @@ exprSetCollation(Node *expr, Oid collation)
 			break;
 		case T_MinMaxExpr:
 			((MinMaxExpr *) expr)->minmaxcollid = collation;
+			break;
+		case T_SQLValueFunction:
+			Assert(!OidIsValid(collation));		/* no collatable results */
 			break;
 		case T_XmlExpr:
 			Assert((((XmlExpr *) expr)->op == IS_XMLSERIALIZE) ?
@@ -1363,6 +1377,10 @@ exprLocation(const Node *expr)
 			/* GREATEST/LEAST keyword should always be the first thing */
 			loc = ((const MinMaxExpr *) expr)->location;
 			break;
+		case T_SQLValueFunction:
+			/* function keyword should always be the first thing */
+			loc = ((const SQLValueFunction *) expr)->location;
+			break;
 		case T_XmlExpr:
 			{
 				const XmlExpr *xexpr = (const XmlExpr *) expr;
@@ -1534,6 +1552,12 @@ exprLocation(const Node *expr)
 			/* just use nested expr's location */
 			loc = exprLocation((Node *) ((const InferenceElem *) expr)->expr);
 			break;
+		case T_PartitionBoundSpec:
+			loc = ((const PartitionBoundSpec *) expr)->location;
+			break;
+		case T_PartitionRangeDatum:
+			loc = ((const PartitionRangeDatum *) expr)->location;
+			break;
 		default:
 			/* for any other node type it's just unknown... */
 			loc = -1;
@@ -1556,6 +1580,184 @@ leftmostLoc(int loc1, int loc2)
 		return loc1;
 	else
 		return Min(loc1, loc2);
+}
+
+
+/*
+ * fix_opfuncids
+ *	  Calculate opfuncid field from opno for each OpExpr node in given tree.
+ *	  The given tree can be anything expression_tree_walker handles.
+ *
+ * The argument is modified in-place.  (This is OK since we'd want the
+ * same change for any node, even if it gets visited more than once due to
+ * shared structure.)
+ */
+void
+fix_opfuncids(Node *node)
+{
+	/* This tree walk requires no special setup, so away we go... */
+	fix_opfuncids_walker(node, NULL);
+}
+
+static bool
+fix_opfuncids_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, OpExpr))
+		set_opfuncid((OpExpr *) node);
+	else if (IsA(node, DistinctExpr))
+		set_opfuncid((OpExpr *) node);	/* rely on struct equivalence */
+	else if (IsA(node, NullIfExpr))
+		set_opfuncid((OpExpr *) node);	/* rely on struct equivalence */
+	else if (IsA(node, ScalarArrayOpExpr))
+		set_sa_opfuncid((ScalarArrayOpExpr *) node);
+	return expression_tree_walker(node, fix_opfuncids_walker, context);
+}
+
+/*
+ * set_opfuncid
+ *		Set the opfuncid (procedure OID) in an OpExpr node,
+ *		if it hasn't been set already.
+ *
+ * Because of struct equivalence, this can also be used for
+ * DistinctExpr and NullIfExpr nodes.
+ */
+void
+set_opfuncid(OpExpr *opexpr)
+{
+	if (opexpr->opfuncid == InvalidOid)
+		opexpr->opfuncid = get_opcode(opexpr->opno);
+}
+
+/*
+ * set_sa_opfuncid
+ *		As above, for ScalarArrayOpExpr nodes.
+ */
+void
+set_sa_opfuncid(ScalarArrayOpExpr *opexpr)
+{
+	if (opexpr->opfuncid == InvalidOid)
+		opexpr->opfuncid = get_opcode(opexpr->opno);
+}
+
+
+/*
+ *	check_functions_in_node -
+ *	  apply checker() to each function OID contained in given expression node
+ *
+ * Returns TRUE if the checker() function does; for nodes representing more
+ * than one function call, returns TRUE if the checker() function does so
+ * for any of those functions.  Returns FALSE if node does not invoke any
+ * SQL-visible function.  Caller must not pass node == NULL.
+ *
+ * This function examines only the given node; it does not recurse into any
+ * sub-expressions.  Callers typically prefer to keep control of the recursion
+ * for themselves, in case additional checks should be made, or because they
+ * have special rules about which parts of the tree need to be visited.
+ *
+ * Note: we ignore MinMaxExpr, SQLValueFunction, XmlExpr, and CoerceToDomain
+ * nodes, because they do not contain SQL function OIDs.  However, they can
+ * invoke SQL-visible functions, so callers should take thought about how to
+ * treat them.
+ */
+bool
+check_functions_in_node(Node *node, check_function_callback checker,
+						void *context)
+{
+	switch (nodeTag(node))
+	{
+		case T_Aggref:
+			{
+				Aggref	   *expr = (Aggref *) node;
+
+				if (checker(expr->aggfnoid, context))
+					return true;
+			}
+			break;
+		case T_WindowFunc:
+			{
+				WindowFunc *expr = (WindowFunc *) node;
+
+				if (checker(expr->winfnoid, context))
+					return true;
+			}
+			break;
+		case T_FuncExpr:
+			{
+				FuncExpr   *expr = (FuncExpr *) node;
+
+				if (checker(expr->funcid, context))
+					return true;
+			}
+			break;
+		case T_OpExpr:
+		case T_DistinctExpr:	/* struct-equivalent to OpExpr */
+		case T_NullIfExpr:		/* struct-equivalent to OpExpr */
+			{
+				OpExpr	   *expr = (OpExpr *) node;
+
+				/* Set opfuncid if it wasn't set already */
+				set_opfuncid(expr);
+				if (checker(expr->opfuncid, context))
+					return true;
+			}
+			break;
+		case T_ScalarArrayOpExpr:
+			{
+				ScalarArrayOpExpr *expr = (ScalarArrayOpExpr *) node;
+
+				set_sa_opfuncid(expr);
+				if (checker(expr->opfuncid, context))
+					return true;
+			}
+			break;
+		case T_CoerceViaIO:
+			{
+				CoerceViaIO *expr = (CoerceViaIO *) node;
+				Oid			iofunc;
+				Oid			typioparam;
+				bool		typisvarlena;
+
+				/* check the result type's input function */
+				getTypeInputInfo(expr->resulttype,
+								 &iofunc, &typioparam);
+				if (checker(iofunc, context))
+					return true;
+				/* check the input type's output function */
+				getTypeOutputInfo(exprType((Node *) expr->arg),
+								  &iofunc, &typisvarlena);
+				if (checker(iofunc, context))
+					return true;
+			}
+			break;
+		case T_ArrayCoerceExpr:
+			{
+				ArrayCoerceExpr *expr = (ArrayCoerceExpr *) node;
+
+				if (OidIsValid(expr->elemfuncid) &&
+					checker(expr->elemfuncid, context))
+					return true;
+			}
+			break;
+		case T_RowCompareExpr:
+			{
+				RowCompareExpr *rcexpr = (RowCompareExpr *) node;
+				ListCell   *opid;
+
+				foreach(opid, rcexpr->opnos)
+				{
+					Oid			opfuncid = get_opcode(lfirst_oid(opid));
+
+					if (checker(opfuncid, context))
+						return true;
+				}
+			}
+			break;
+		default:
+			break;
+	}
+	return false;
 }
 
 
@@ -1681,6 +1883,7 @@ expression_tree_walker(Node *node,
 		case T_CaseTestExpr:
 		case T_SetToDefault:
 		case T_CurrentOfExpr:
+		case T_SQLValueFunction:
 		case T_RangeTblRef:
 		case T_SortGroupClause:
 			/* primitive node types with no expression subnodes */
@@ -2255,6 +2458,7 @@ expression_tree_mutator(Node *node,
 		case T_CaseTestExpr:
 		case T_SetToDefault:
 		case T_CurrentOfExpr:
+		case T_SQLValueFunction:
 		case T_RangeTblRef:
 		case T_SortGroupClause:
 			return (Node *) copyObject(node);
@@ -2273,6 +2477,8 @@ expression_tree_mutator(Node *node,
 				Aggref	   *newnode;
 
 				FLATCOPY(newnode, aggref, Aggref);
+				/* assume mutation doesn't change types of arguments */
+				newnode->aggargtypes = list_copy(aggref->aggargtypes);
 				MUTATE(newnode->aggdirectargs, aggref->aggdirectargs, List *);
 				MUTATE(newnode->args, aggref->args, List *);
 				MUTATE(newnode->aggorder, aggref->aggorder, List *);
@@ -2991,8 +3197,10 @@ query_or_expression_tree_mutator(Node *node,
  * Unlike expression_tree_walker, there is no special rule about query
  * boundaries: we descend to everything that's possibly interesting.
  *
- * Currently, the node type coverage extends to SelectStmt and everything
- * that could appear under it, but not other statement types.
+ * Currently, the node type coverage here extends only to DML statements
+ * (SELECT/INSERT/UPDATE/DELETE) and nodes that can appear in them, because
+ * this is used mainly during analysis of CTEs, and only DML statements can
+ * appear in CTEs.
  */
 bool
 raw_expression_tree_walker(Node *node,
@@ -3015,6 +3223,7 @@ raw_expression_tree_walker(Node *node,
 	{
 		case T_SetToDefault:
 		case T_CurrentOfExpr:
+		case T_SQLValueFunction:
 		case T_Integer:
 		case T_Float:
 		case T_String:
@@ -3370,6 +3579,15 @@ raw_expression_tree_walker(Node *node,
 				/* for now, constraints are ignored */
 			}
 			break;
+		case T_IndexElem:
+			{
+				IndexElem  *indelem = (IndexElem *) node;
+
+				if (walker(indelem->expr, context))
+					return true;
+				/* collation and opclass names are deemed uninteresting */
+			}
+			break;
 		case T_GroupingSet:
 			return walker(((GroupingSet *) node)->content, context);
 		case T_LockingClause:
@@ -3425,7 +3643,9 @@ raw_expression_tree_walker(Node *node,
  * recurse into any sub-nodes it has.
  */
 bool
-planstate_tree_walker(PlanState *planstate, bool (*walker) (), void *context)
+planstate_tree_walker(PlanState *planstate,
+					  bool (*walker) (),
+					  void *context)
 {
 	Plan	   *plan = planstate->plan;
 	ListCell   *lc;
@@ -3486,7 +3706,7 @@ planstate_tree_walker(PlanState *planstate, bool (*walker) (), void *context)
 				return true;
 			break;
 		case T_CustomScan:
-			foreach (lc, ((CustomScanState *) planstate)->custom_ps)
+			foreach(lc, ((CustomScanState *) planstate)->custom_ps)
 			{
 				if (walker((PlanState *) lfirst(lc), context))
 					return true;
@@ -3507,7 +3727,9 @@ planstate_tree_walker(PlanState *planstate, bool (*walker) (), void *context)
  * Walk a list of SubPlans (or initPlans, which also use SubPlan nodes).
  */
 static bool
-planstate_walk_subplans(List *plans, bool (*walker) (), void *context)
+planstate_walk_subplans(List *plans,
+						bool (*walker) (),
+						void *context)
 {
 	ListCell   *lc;
 

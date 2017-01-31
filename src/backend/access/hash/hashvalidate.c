@@ -3,7 +3,7 @@
  * hashvalidate.c
  *	  Opclass validator for hash.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -25,6 +25,7 @@
 #include "parser/parse_coerce.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/regproc.h"
 #include "utils/syscache.h"
 
 
@@ -95,7 +96,7 @@ hashvalidate(Oid opclassoid)
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("hash opfamily %s contains support procedure %s with cross-type registration",
+					 errmsg("hash operator family \"%s\" contains support procedure %s with cross-type registration",
 							opfamilyname,
 							format_procedure(procform->amproc))));
 			result = false;
@@ -110,7 +111,7 @@ hashvalidate(Oid opclassoid)
 				{
 					ereport(INFO,
 							(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-							 errmsg("hash opfamily %s contains function %s with wrong signature for support number %d",
+							 errmsg("hash operator family \"%s\" contains function %s with wrong signature for support number %d",
 									opfamilyname,
 									format_procedure(procform->amproc),
 									procform->amprocnum)));
@@ -127,7 +128,7 @@ hashvalidate(Oid opclassoid)
 			default:
 				ereport(INFO,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-						 errmsg("hash opfamily %s contains function %s with invalid support number %d",
+						 errmsg("hash operator family \"%s\" contains function %s with invalid support number %d",
 								opfamilyname,
 								format_procedure(procform->amproc),
 								procform->amprocnum)));
@@ -148,7 +149,7 @@ hashvalidate(Oid opclassoid)
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("hash opfamily %s contains operator %s with invalid strategy number %d",
+					 errmsg("hash operator family \"%s\" contains operator %s with invalid strategy number %d",
 							opfamilyname,
 							format_operator(oprform->amopopr),
 							oprform->amopstrategy)));
@@ -161,7 +162,7 @@ hashvalidate(Oid opclassoid)
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("hash opfamily %s contains invalid ORDER BY specification for operator %s",
+					 errmsg("hash operator family \"%s\" contains invalid ORDER BY specification for operator %s",
 							opfamilyname,
 							format_operator(oprform->amopopr))));
 			result = false;
@@ -174,7 +175,7 @@ hashvalidate(Oid opclassoid)
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("hash opfamily %s contains operator %s with wrong signature",
+					 errmsg("hash operator family \"%s\" contains operator %s with wrong signature",
 							opfamilyname,
 							format_operator(oprform->amopopr))));
 			result = false;
@@ -186,9 +187,9 @@ hashvalidate(Oid opclassoid)
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-			errmsg("hash opfamily %s lacks support function for operator %s",
-				   opfamilyname,
-				   format_operator(oprform->amopopr))));
+					 errmsg("hash operator family \"%s\" lacks support function for operator %s",
+							opfamilyname,
+							format_operator(oprform->amopopr))));
 			result = false;
 		}
 	}
@@ -214,7 +215,7 @@ hashvalidate(Oid opclassoid)
 		{
 			ereport(INFO,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("hash opfamily %s is missing operator(s) for types %s and %s",
+					 errmsg("hash operator family \"%s\" is missing operator(s) for types %s and %s",
 							opfamilyname,
 							format_type_be(thisgroup->lefttype),
 							format_type_be(thisgroup->righttype))));
@@ -228,7 +229,7 @@ hashvalidate(Oid opclassoid)
 	{
 		ereport(INFO,
 				(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-				 errmsg("hash opclass %s is missing operator(s)",
+				 errmsg("hash operator class \"%s\" is missing operator(s)",
 						opclassname)));
 		result = false;
 	}
@@ -244,7 +245,7 @@ hashvalidate(Oid opclassoid)
 	{
 		ereport(INFO,
 				(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-				 errmsg("hash opfamily %s is missing cross-type operator(s)",
+				 errmsg("hash operator family \"%s\" is missing cross-type operator(s)",
 						opfamilyname)));
 		result = false;
 	}

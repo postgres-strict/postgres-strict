@@ -3,7 +3,7 @@
  * dropcmds.c
  *	  handle various "DROP" operations
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -222,12 +222,10 @@ type_in_list_does_not_exist_skipping(List *typenames, const char **msg,
 
 	foreach(l, typenames)
 	{
-		TypeName   *typeName = (TypeName *) lfirst(l);
+		TypeName   *typeName = castNode(TypeName, lfirst(l));
 
 		if (typeName != NULL)
 		{
-			Assert(IsA(typeName, TypeName));
-
 			if (!OidIsValid(LookupTypeNameOid(NULL, typeName, true)))
 			{
 				/* type doesn't exist, try to find why */
@@ -262,6 +260,10 @@ does_not_exist_skipping(ObjectType objtype, List *objname, List *objargs)
 
 	switch (objtype)
 	{
+		case OBJECT_ACCESS_METHOD:
+			msg = gettext_noop("access method \"%s\" does not exist, skipping");
+			name = NameListToString(objname);
+			break;
 		case OBJECT_TYPE:
 		case OBJECT_DOMAIN:
 			{
@@ -437,8 +439,12 @@ does_not_exist_skipping(ObjectType objtype, List *objname, List *objargs)
 				}
 			}
 			break;
+		case OBJECT_PUBLICATION:
+			msg = gettext_noop("publication \"%s\" does not exist, skipping");
+			name = NameListToString(objname);
+			break;
 		default:
-			elog(ERROR, "unexpected object type (%d)", (int) objtype);
+			elog(ERROR, "unrecognized object type: %d", (int) objtype);
 			break;
 	}
 

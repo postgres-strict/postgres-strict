@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_operator.h
@@ -142,7 +142,7 @@ DESCR("prepend element onto front of array");
 DATA(insert OID = 375 (  "||"	   PGNSP PGUID b f f 2277 2277 2277 0 0 array_cat	   -	   -	 ));
 DESCR("concatenate");
 
-DATA(insert OID = 352 (  "="	   PGNSP PGUID b f t	28	28	16	352	  3315 xideq eqsel eqjoinsel ));
+DATA(insert OID = 352 (  "="	   PGNSP PGUID b f t	28	28	16	352   3315 xideq eqsel eqjoinsel ));
 DESCR("equal");
 DATA(insert OID = 353 (  "="	   PGNSP PGUID b f f	28	23	16	0	  3316 xideqint4 eqsel eqjoinsel ));
 DESCR("equal");
@@ -155,8 +155,6 @@ DESCR("factorial");
 DATA(insert OID = 389 (  "!!"	   PGNSP PGUID l f f	 0	20	1700  0  0 numeric_fac - - ));
 DESCR("deprecated, use ! instead");
 DATA(insert OID = 385 (  "="	   PGNSP PGUID b f t	29	29	16 385	 0 cideq eqsel eqjoinsel ));
-DESCR("equal");
-DATA(insert OID = 386 (  "="	   PGNSP PGUID b f t	22	22	16 386	 0 int2vectoreq eqsel eqjoinsel ));
 DESCR("equal");
 
 DATA(insert OID = 387 (  "="	   PGNSP PGUID b t f	27	27	16 387 402 tideq eqsel eqjoinsel ));
@@ -711,6 +709,10 @@ DATA(insert OID = 908 (  "*"	   PGNSP PGUID b f f	790  701	790 916   0 cash_mul_
 DESCR("multiply");
 DATA(insert OID = 909 (  "/"	   PGNSP PGUID b f f	790  701	790   0   0 cash_div_flt8 - - ));
 DESCR("divide");
+DATA(insert OID = 3346 (  "*"	   PGNSP PGUID b f f	790  20		790 3349  0 cash_mul_int8 - - ));
+DESCR("multiply");
+DATA(insert OID = 3347 (  "/"	   PGNSP PGUID b f f	790  20		790   0   0 cash_div_int8 - - ));
+DESCR("divide");
 DATA(insert OID = 912 (  "*"	   PGNSP PGUID b f f	790  23		790 917   0 cash_mul_int4 - - ));
 DESCR("multiply");
 DATA(insert OID = 913 (  "/"	   PGNSP PGUID b f f	790  23		790   0   0 cash_div_int4 - - ));
@@ -720,6 +722,8 @@ DESCR("multiply");
 DATA(insert OID = 915 (  "/"	   PGNSP PGUID b f f	790  21		790   0   0 cash_div_int2 - - ));
 DESCR("divide");
 DATA(insert OID = 916 (  "*"	   PGNSP PGUID b f f	701  790	790 908   0 flt8_mul_cash - - ));
+DESCR("multiply");
+DATA(insert OID = 3349 (  "*"	   PGNSP PGUID b f f	20	790		790 3346  0 int8_mul_cash - - ));
 DESCR("multiply");
 DATA(insert OID = 917 (  "*"	   PGNSP PGUID b f f	23	790		790 912   0 int4_mul_cash - - ));
 DESCR("multiply");
@@ -1675,6 +1679,9 @@ DATA(insert OID = 3680 (  "&&"	   PGNSP PGUID b f f 3615	 3615	 3615  0	0	 tsque
 DESCR("AND-concatenate");
 DATA(insert OID = 3681 (  "||"	   PGNSP PGUID b f f 3615	 3615	 3615  0	0	 tsquery_or   -		-	  ));
 DESCR("OR-concatenate");
+/* <-> operation calls tsquery_phrase, but function is polymorphic. So, point to OID of the tsquery_phrase */
+DATA(insert OID = 5005 (  "<->"    PGNSP PGUID b f f 3615	 3615	 3615  0	0	 5003	-		-	  ));
+DESCR("phrase-concatenate");
 DATA(insert OID = 3682 (  "!!"	   PGNSP PGUID l f f 0		 3615	 3615  0	0	 tsquery_not   -	-	  ));
 DESCR("NOT tsquery");
 DATA(insert OID = 3693 (  "@>"	   PGNSP PGUID b f f 3615	 3615	 16 3694	0	 tsq_mcontains	contsel    contjoinsel	 ));
@@ -1819,6 +1826,8 @@ DATA(insert OID = 3284 (  "||"	   PGNSP PGUID b f f 3802 3802 3802 0 0 jsonb_con
 DESCR("concatenate");
 DATA(insert OID = 3285 (  "-"	   PGNSP PGUID b f f 3802 25 3802 0 0 3302 - - ));
 DESCR("delete object field");
+DATA(insert OID = 3398 (  "-"      PGNSP PGUID b f f 3802 1009 3802 0 0 3343 - -));
+DESCR("delete object fields");
 DATA(insert OID = 3286 (  "-"	   PGNSP PGUID b f f 3802 23 3802 0 0 3303 - - ));
 DESCR("delete array element");
 DATA(insert OID = 3287 (  "#-"	   PGNSP PGUID b f f 3802 1009 3802 0 0 jsonb_delete_path - - ));

@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_opfamily.h
@@ -79,6 +79,7 @@ DATA(insert OID = 1974 (	403		network_ops		PGNSP PGUID ));
 #define NETWORK_BTREE_FAM_OID 1974
 DATA(insert OID = 1975 (	405		network_ops		PGNSP PGUID ));
 DATA(insert OID = 3550 (	783		network_ops		PGNSP PGUID ));
+DATA(insert OID = 3794 (	4000	network_ops		PGNSP PGUID ));
 DATA(insert OID = 1976 (	403		integer_ops		PGNSP PGUID ));
 #define INTEGER_BTREE_FAM_OID 1976
 DATA(insert OID = 1977 (	405		integer_ops		PGNSP PGUID ));
@@ -116,7 +117,6 @@ DATA(insert OID = 2099 (	403		money_ops		PGNSP PGUID ));
 DATA(insert OID = 2222 (	405		bool_ops		PGNSP PGUID ));
 #define BOOL_HASH_FAM_OID 2222
 DATA(insert OID = 2223 (	405		bytea_ops		PGNSP PGUID ));
-DATA(insert OID = 2224 (	405		int2vector_ops	PGNSP PGUID ));
 DATA(insert OID = 2789 (	403		tid_ops			PGNSP PGUID ));
 DATA(insert OID = 2225 (	405		xid_ops			PGNSP PGUID ));
 DATA(insert OID = 2226 (	405		cid_ops			PGNSP PGUID ));
@@ -182,5 +182,6 @@ DATA(insert OID = 4081 (	3580	uuid_minmax_ops			PGNSP PGUID ));
 DATA(insert OID = 4103 (	3580	range_inclusion_ops		PGNSP PGUID ));
 DATA(insert OID = 4082 (	3580	pg_lsn_minmax_ops		PGNSP PGUID ));
 DATA(insert OID = 4104 (	3580	box_inclusion_ops		PGNSP PGUID ));
+DATA(insert OID = 5000 (	4000	box_ops		PGNSP PGUID ));
 
 #endif   /* PG_OPFAMILY_H */

@@ -2,11 +2,11 @@
 
 # src/tools/msvc/pgflex.pl
 
-# silence flex bleatings about file path style
-$ENV{CYGWIN} = 'nodosfilewarning';
-
 use strict;
 use File::Basename;
+
+# silence flex bleatings about file path style
+$ENV{CYGWIN} = 'nodosfilewarning';
 
 # assume we are in the postgres source root
 
@@ -16,8 +16,8 @@ my ($flexver) = `flex -V`;    # grab first line
 $flexver = (split(/\s+/, $flexver))[1];
 $flexver =~ s/[^0-9.]//g;
 my @verparts = split(/\./, $flexver);
-unless ($verparts[0] == 2 &&
-	    ($verparts[1] > 5 || ($verparts[1] == 5 && $verparts[2] >= 31)))
+unless ($verparts[0] == 2
+	&& ($verparts[1] > 5 || ($verparts[1] == 5 && $verparts[2] >= 31)))
 {
 	print "WARNING! Flex install not found, or unsupported Flex version.\n";
 	print "echo Attempting to build without.\n";

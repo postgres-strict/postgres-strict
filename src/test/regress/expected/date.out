@@ -816,6 +816,27 @@ SELECT date '1999 08 01';
  1999-08-01
 (1 row)
 
+-- Check upper and lower limits of date range
+SELECT date '4714-11-24 BC';
+     date      
+---------------
+ 4714-11-24 BC
+(1 row)
+
+SELECT date '4714-11-23 BC';  -- out of range
+ERROR:  date out of range: "4714-11-23 BC"
+LINE 1: SELECT date '4714-11-23 BC';
+                    ^
+SELECT date '5874897-12-31';
+     date      
+---------------
+ 5874897-12-31
+(1 row)
+
+SELECT date '5874898-01-01';  -- out of range
+ERROR:  date out of range: "5874898-01-01"
+LINE 1: SELECT date '5874898-01-01';
+                    ^
 RESET datestyle;
 --
 -- Simple math
@@ -1433,6 +1454,12 @@ select make_date(2013, 7, 15);
  07-15-2013
 (1 row)
 
+select make_date(-44, 3, 15);
+   make_date   
+---------------
+ 03-15-0044 BC
+(1 row)
+
 select make_time(8, 20, 0.0);
  make_time 
 -----------
@@ -1446,8 +1473,6 @@ select make_date(2013, 13, 1);
 ERROR:  date field value out of range: 2013-13-01
 select make_date(2013, 11, -1);
 ERROR:  date field value out of range: 2013-11--1
-select make_date(-44, 3, 15);  -- perhaps we should allow this sometime?
-ERROR:  date field value out of range: -44-03-15
 select make_time(10, 55, 100.1);
 ERROR:  time field value out of range: 10:55:100.1
 select make_time(24, 0, 2.1);

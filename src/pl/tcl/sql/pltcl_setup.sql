@@ -57,12 +57,33 @@ create function check_pkey1_exists(int4, bpchar) returns bool as E'
 
 -- dump trigger data
 
-CREATE TABLE trigger_test
-    (i int, v text );
+CREATE TABLE trigger_test (
+	i int,
+	v text,
+	dropme text,
+	test_skip boolean DEFAULT false,
+	test_return_null boolean DEFAULT false,
+	test_argisnull boolean DEFAULT false
+);
+-- Make certain dropped attributes are handled correctly
+ALTER TABLE trigger_test DROP dropme;
 
-CREATE VIEW trigger_test_view AS SELECT * FROM trigger_test;
+CREATE VIEW trigger_test_view AS SELECT i, v FROM trigger_test;
 
 CREATE FUNCTION trigger_data() returns trigger language pltcl as $_$
+	if {$TG_table_name eq "trigger_test" && $TG_level eq "ROW" && $TG_op ne "DELETE"} {
+		# Special case tests
+		if {$NEW(test_return_null) eq "t" } {
+			return_null
+		}
+		if {$NEW(test_argisnull) eq "t" } {
+			set should_error [argisnull 1]
+		}
+		if {$NEW(test_skip) eq "t" } {
+			elog NOTICE "SKIPPING OPERATION $TG_op"
+			return SKIP
+		}
+	}
 
 	if { [info exists TG_relid] } {
 	set TG_relid "bogus:12345"
@@ -97,6 +118,9 @@ $_$;
 CREATE TRIGGER show_trigger_data_trig
 BEFORE INSERT OR UPDATE OR DELETE ON trigger_test
 FOR EACH ROW EXECUTE PROCEDURE trigger_data(23,'skidoo');
+CREATE TRIGGER statement_trigger
+BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON trigger_test
+FOR EACH STATEMENT EXECUTE PROCEDURE trigger_data(42,'statement trigger');
 
 CREATE TRIGGER show_trigger_data_view_trig
 INSTEAD OF INSERT OR UPDATE OR DELETE ON trigger_test_view
@@ -429,6 +453,24 @@ create trigger dta2_before before insert or update on T_dta2
 	check_primkey('ref1', 'ref2', 'T_pkey2', 'key1', 'key2');
 
 
+create function tcl_composite_arg_ref1(T_dta1) returns int as '
+    return $1(ref1)
+' language pltcl;
+
+create function tcl_composite_arg_ref2(T_dta1) returns text as '
+    return $1(ref2)
+' language pltcl;
+
+create function tcl_argisnull(text) returns bool as '
+    argisnull 1
+' language pltcl;
+
+create function tcl_lastoid(tabname text) returns int8 as '
+    spi_exec "insert into $1 default values"
+    spi_lastoid
+' language pltcl;
+
+
 create function tcl_int4add(int4,int4) returns int4 as '
     return [expr $1 + $2]
 ' language pltcl;
@@ -561,14 +603,14 @@ select tcl_date_week(2010,1,24);
 select tcl_date_week(2001,10,24);
 
 -- test pltcl event triggers
-create or replace function tclsnitch() returns event_trigger language pltcl as $$
+create function tclsnitch() returns event_trigger language pltcl as $$
   elog NOTICE "tclsnitch: $TG_event $TG_tag"
 $$;
 
 create event trigger tcl_a_snitch on ddl_command_start execute procedure tclsnitch();
 create event trigger tcl_b_snitch on ddl_command_end execute procedure tclsnitch();
 
-create or replace function foobar() returns int language sql as $$select 1;$$;
+create function foobar() returns int language sql as $$select 1;$$;
 alter function foobar() cost 77;
 drop function foobar();
 
@@ -577,3 +619,114 @@ drop table foo;
 
 drop event trigger tcl_a_snitch;
 drop event trigger tcl_b_snitch;
+
+create function tcl_test_cube_squared(in int, out squared int, out cubed int) as $$
+    return [list squared [expr {$1 * $1}] cubed [expr {$1 * $1 * $1}]]
+$$ language pltcl;
+
+create function tcl_test_squared_rows(int,int) returns table (x int, y int) as $$
+    for {set i $1} {$i < $2} {incr i} {
+        return_next [list y [expr {$i * $i}] x $i]
+    }
+$$ language pltcl;
+
+create function tcl_test_sequence(int,int) returns setof int as $$
+    for {set i $1} {$i < $2} {incr i} {
+        return_next $i
+    }
+$$ language pltcl;
+
+create function tcl_eval(string text) returns text as $$
+    eval $1
+$$ language pltcl;
+
+-- test use of errorCode in error handling
+create function tcl_error_handling_test(text) returns text
+language pltcl
+as $function$
+    if {[catch $1 err]} {
+        # If not a Postgres error, just return the basic error message
+        if {[lindex $::errorCode 0] != "POSTGRES"} {
+            return $err
+        }
+
+        # Get rid of keys that can't be expected to remain constant
+        array set myArray $::errorCode
+        unset myArray(POSTGRES)
+        unset -nocomplain myArray(funcname)
+        unset -nocomplain myArray(filename)
+        unset -nocomplain myArray(lineno)
+
+        # Format into something nicer
+        set vals []
+        foreach {key} [lsort [array names myArray]] {
+            set value [string map {"\n" "\n\t"} $myArray($key)]
+            lappend vals "$key: $value"
+        }
+        return [join $vals "\n"]
+    } else {
+        return "no error"
+    }
+$function$;
+
+-- test spi_exec and spi_execp with -array
+create function tcl_spi_exec(
+    prepare boolean,
+    action text
+)
+returns void language pltcl AS $function$
+set query "select * from (values (1,'foo'),(2,'bar'),(3,'baz')) v(col1,col2)"
+if {$1 == "t"} {
+    set prep [spi_prepare $query {}]
+    spi_execp -array A $prep {
+        elog NOTICE "col1 $A(col1), col2 $A(col2)"
+
+        switch $A(col1) {
+            2 {
+                elog NOTICE "action: $2"
+                switch $2 {
+                    break {
+                        break
+                    }
+                    continue {
+                        continue
+                    }
+                    return {
+                        return
+                    }
+                    error {
+                        error "error message"
+                    }
+                }
+                error "should not get here"
+            }
+        }
+    }
+} else {
+    spi_exec -array A $query {
+        elog NOTICE "col1 $A(col1), col2 $A(col2)"
+
+        switch $A(col1) {
+            2 {
+                elog NOTICE "action: $2"
+                switch $2 {
+                    break {
+                        break
+                    }
+                    continue {
+                        continue
+                    }
+                    return {
+                        return
+                    }
+                    error {
+                        error "error message"
+                    }
+                }
+                error "should not get here"
+            }
+        }
+    }
+}
+elog NOTICE "end of function"
+$function$;

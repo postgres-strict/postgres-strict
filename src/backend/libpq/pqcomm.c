@@ -27,7 +27,7 @@
  * the backend's "backend/libpq" is quite separate from "interfaces/libpq".
  * All that remains is similarities of names to trap the unwary...
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	src/backend/libpq/pqcomm.c
@@ -89,7 +89,7 @@
 #include <mstcpip.h>
 #endif
 
-#include "libpq/ip.h"
+#include "common/ip.h"
 #include "libpq/libpq.h"
 #include "miscadmin.h"
 #include "storage/ipc.h"
@@ -145,7 +145,6 @@ static void socket_startcopyout(void);
 static void socket_endcopyout(bool errorAbort);
 static int	internal_putbytes(const char *s, size_t len);
 static int	internal_flush(void);
-static void socket_set_nonblocking(bool nonblocking);
 
 #ifdef HAVE_UNIX_SOCKETS
 static int	Lock_AF_UNIX(char *unixSocketDir, char *unixSocketPath);
@@ -165,6 +164,7 @@ static PQcommMethods PqCommSocketMethods = {
 
 PQcommMethods *PqCommMethods = &PqCommSocketMethods;
 
+WaitEventSet *FeBeWaitSet;
 
 
 /* --------------------------------
@@ -201,6 +201,11 @@ pq_init(void)
 				(errmsg("could not set socket to nonblocking mode: %m")));
 #endif
 
+	FeBeWaitSet = CreateWaitEventSet(TopMemoryContext, 3);
+	AddWaitEventToSet(FeBeWaitSet, WL_SOCKET_WRITEABLE, MyProcPort->sock,
+					  NULL, NULL);
+	AddWaitEventToSet(FeBeWaitSet, WL_LATCH_SET, -1, MyLatch, NULL);
+	AddWaitEventToSet(FeBeWaitSet, WL_POSTMASTER_DEATH, -1, NULL, NULL);
 }
 
 /* --------------------------------
@@ -677,16 +682,6 @@ StreamConnection(pgsocket server_fd, Port *port)
 		pg_usleep(100000L);		/* wait 0.1 sec */
 		return STATUS_ERROR;
 	}
-
-#ifdef SCO_ACCEPT_BUG
-
-	/*
-	 * UnixWare 7+ and OpenServer 5.0.4 are known to have this bug, but it
-	 * shouldn't hurt to catch it for all versions of those platforms.
-	 */
-	if (port->raddr.addr.ss_family == 0)
-		port->raddr.addr.ss_family = AF_UNIX;
-#endif
 
 	/* fill in the server (local) address */
 	port->laddr.salen = sizeof(port->laddr.addr);
@@ -1168,7 +1163,7 @@ pq_startmsgread(void)
 	if (PqCommReadingMsg)
 		ereport(FATAL,
 				(errcode(ERRCODE_PROTOCOL_VIOLATION),
-		   errmsg("terminating connection because protocol synchronization was lost")));
+				 errmsg("terminating connection because protocol synchronization was lost")));
 
 	PqCommReadingMsg = true;
 }

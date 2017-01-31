@@ -3,7 +3,7 @@
  * event_trigger.c
  *	  PostgreSQL EVENT TRIGGER support code.
  *
- * Portions Copyright (c) 1996-2016, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -86,6 +86,7 @@ typedef enum
 
 /* XXX merge this with ObjectTypeMap? */
 static event_trigger_support_data event_trigger_support[] = {
+	{"ACCESS METHOD", true},
 	{"AGGREGATE", true},
 	{"CAST", true},
 	{"CONSTRAINT", true},
@@ -105,11 +106,13 @@ static event_trigger_support_data event_trigger_support[] = {
 	{"OPERATOR CLASS", true},
 	{"OPERATOR FAMILY", true},
 	{"POLICY", true},
+	{"PUBLICATION", true},
 	{"ROLE", false},
 	{"RULE", true},
 	{"SCHEMA", true},
 	{"SEQUENCE", true},
 	{"SERVER", true},
+	{"SUBSCRIPTION", true},
 	{"TABLE", true},
 	{"TABLESPACE", false},
 	{"TRANSFORM", true},
@@ -236,8 +239,8 @@ CreateEventTrigger(CreateEventTrigStmt *stmt)
 	if (funcrettype != EVTTRIGGEROID)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-				 errmsg("function \"%s\" must return type \"event_trigger\"",
-						NameListToString(stmt->funcname))));
+				 errmsg("function %s must return type %s",
+						NameListToString(stmt->funcname), "event_trigger")));
 
 	/* Insert catalog entries. */
 	return insert_event_trigger_tuple(stmt->trigname, stmt->eventname,
@@ -741,7 +744,7 @@ EventTriggerCommonSetup(Node *parsetree,
 
 	/*
 	 * Filter list of event triggers by command tag, and copy them into our
-	 * memory context.  Once we start running the command trigers, or indeed
+	 * memory context.  Once we start running the command triggers, or indeed
 	 * once we do anything at all that touches the catalogs, an invalidation
 	 * might leave cachelist pointing at garbage, so we must do this before we
 	 * can do much else.
@@ -1017,9 +1020,7 @@ EventTriggerInvoke(List *fn_oid_list, EventTriggerData *trigdata)
 	 */
 	context = AllocSetContextCreate(CurrentMemoryContext,
 									"event trigger context",
-									ALLOCSET_DEFAULT_MINSIZE,
-									ALLOCSET_DEFAULT_INITSIZE,
-									ALLOCSET_DEFAULT_MAXSIZE);
+									ALLOCSET_DEFAULT_SIZES);
 	oldcontext = MemoryContextSwitchTo(context);
 
 	/* Call each event trigger. */
@@ -1078,6 +1079,7 @@ EventTriggerSupportsObjectType(ObjectType obtype)
 		case OBJECT_EVENT_TRIGGER:
 			/* no support for event triggers on event triggers */
 			return false;
+		case OBJECT_ACCESS_METHOD:
 		case OBJECT_AGGREGATE:
 		case OBJECT_AMOP:
 		case OBJECT_AMPROC:
@@ -1103,9 +1105,12 @@ EventTriggerSupportsObjectType(ObjectType obtype)
 		case OBJECT_OPERATOR:
 		case OBJECT_OPFAMILY:
 		case OBJECT_POLICY:
+		case OBJECT_PUBLICATION:
+		case OBJECT_PUBLICATION_REL:
 		case OBJECT_RULE:
 		case OBJECT_SCHEMA:
 		case OBJECT_SEQUENCE:
+		case OBJECT_SUBSCRIPTION:
 		case OBJECT_TABCONSTRAINT:
 		case OBJECT_TABLE:
 		case OBJECT_TRANSFORM:
@@ -1167,6 +1172,10 @@ EventTriggerSupportsObjectClass(ObjectClass objclass)
 		case OCLASS_DEFACL:
 		case OCLASS_EXTENSION:
 		case OCLASS_POLICY:
+		case OCLASS_AM:
+		case OCLASS_PUBLICATION:
+		case OCLASS_PUBLICATION_REL:
+		case OCLASS_SUBSCRIPTION:
 			return true;
 	}
 
@@ -1223,9 +1232,7 @@ EventTriggerBeginCompleteQuery(void)
 
 	cxt = AllocSetContextCreate(TopMemoryContext,
 								"event trigger state",
-								ALLOCSET_DEFAULT_MINSIZE,
-								ALLOCSET_DEFAULT_INITSIZE,
-								ALLOCSET_DEFAULT_MAXSIZE);
+								ALLOCSET_DEFAULT_SIZES);
 	state = MemoryContextAlloc(cxt, sizeof(EventTriggerQueryState));
 	state->cxt = cxt;
 	slist_init(&(state->SQLDropList));

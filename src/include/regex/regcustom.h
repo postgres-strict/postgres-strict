@@ -58,14 +58,34 @@
 /* internal character type and related */
 typedef pg_wchar chr;			/* the type itself */
 typedef unsigned uchr;			/* unsigned type that will hold a chr */
-typedef int celt;				/* type to hold chr, or NOCELT */
 
-#define NOCELT	(-1)			/* celt value which is not valid chr */
 #define CHR(c)	((unsigned char) (c))	/* turn char literal into chr literal */
 #define DIGITVAL(c) ((c)-'0')	/* turn chr digit into its value */
 #define CHRBITS 32				/* bits in a chr; must not use sizeof */
 #define CHR_MIN 0x00000000		/* smallest and largest chr; the value */
-#define CHR_MAX 0xfffffffe		/* CHR_MAX-CHR_MIN+1 should fit in uchr */
+#define CHR_MAX 0x7ffffffe		/* CHR_MAX-CHR_MIN+1 must fit in an int, and
+								 * CHR_MAX+1 must fit in a chr variable */
+
+/*
+ * Check if a chr value is in range.  Ideally we'd just write this as
+ *		((c) >= CHR_MIN && (c) <= CHR_MAX)
+ * However, if chr is unsigned and CHR_MIN is zero, the first part of that
+ * is a no-op, and certain overly-nannyish compilers give warnings about it.
+ * So we leave that out here.  If you want to make chr signed and/or CHR_MIN
+ * not zero, redefine this macro as above.  Callers should assume that the
+ * macro may multiply evaluate its argument, even though it does not today.
+ */
+#define CHR_IS_IN_RANGE(c)	((c) <= CHR_MAX)
+
+/*
+ * MAX_SIMPLE_CHR is the cutoff between "simple" and "complicated" processing
+ * in the color map logic.  It should usually be chosen high enough to ensure
+ * that all common characters are <= MAX_SIMPLE_CHR.  However, very large
+ * values will be counterproductive since they cause more regex setup time.
+ * Also, small values can be helpful for testing the high-color-map logic
+ * with plain old ASCII input.
+ */
+#define MAX_SIMPLE_CHR	0x7FF	/* suitable value for Unicode */
 
 /* functions operating on chr */
 #define iscalnum(x) pg_wc_isalnum(x)
