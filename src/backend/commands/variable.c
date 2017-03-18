@@ -519,6 +519,8 @@ check_postgres_strict_disable(char **newval, void **extra, GucSource source)
 			}
 			else if (pg_strcasecmp(tok, "require_column_as") == 0)
 				disabled |= POSTGRES_STRICT_REQUIRE_COLUMN_AS;
+			else if (pg_strcasecmp(tok, "randomize_values_order") == 0)
+				disabled |= POSTGRES_STRICT_RANDOMIZE_VALUES_ORDER;
 			else
 			{
 				GUC_check_errdetail("Unrecognized key word: \"%s\".", tok);
