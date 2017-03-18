@@ -391,6 +391,7 @@ static const struct config_enum_entry postgres_strict_violation_level_options[] 
 	{"error", ERROR, false},
 	{"fatal", FATAL, false},
 	{"assert", POSTGRES_STRICT_ASSERT, false},
+	{NULL, 0, false}
 };
 
 static const struct config_enum_entry force_parallel_mode_options[] = {
