@@ -134,6 +134,7 @@ test: sysviews
 test: tsrf
 test: tidscan
 test: stats_ext
+test: postgres_strict
 test: rules
 test: psql_crosstab
 test: select_parallel

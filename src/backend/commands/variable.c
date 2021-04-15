@@ -513,6 +513,8 @@ check_postgres_strict_disable(char **newval, void **extra, GucSource source)
 				list_free(elemlist);
 				return false;
 			}
+			else if (pg_strcasecmp(tok, "require_column_as") == 0)
+				disabled |= POSTGRES_STRICT_REQUIRE_COLUMN_AS;
 			else
 			{
 				GUC_check_errdetail("Unrecognized key word: \"%s\".", tok);

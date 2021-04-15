@@ -11,6 +11,7 @@
 extern int postgres_strict;
 
 #define POSTGRES_STRICT_NONE				0
+#define POSTGRES_STRICT_REQUIRE_COLUMN_AS	1
 #define POSTGRES_STRICT_ALL					((int) ~0)
 
 /* Used in guc.c; must not be equal to any of the codes in utils/elog.h */
