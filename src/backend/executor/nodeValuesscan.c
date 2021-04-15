@@ -27,6 +27,7 @@
 #include "executor/nodeValuesscan.h"
 #include "jit/jit.h"
 #include "optimizer/clauses.h"
+#include "postgres_strict.h"
 #include "utils/expandeddatum.h"
 
 
@@ -314,6 +315,25 @@ ExecInitValuesScan(ValuesScan *node, EState *estate, int eflags)
 			estate->es_jit_flags = saved_jit_flags;
 		}
 		i++;
+	}
+
+	if (postgres_strict & POSTGRES_STRICT_RANDOMIZE_VALUES_ORDER)
+	{
+		for (i = list_length(node->values_lists) - 1; i > 0; i--)
+		{
+			long j;
+			List *tmp;
+
+			j = (random() % (i+1));
+
+			tmp = scanstate->exprlists[i];
+			scanstate->exprlists[i] = scanstate->exprlists[j];
+			scanstate->exprlists[j] = tmp;
+
+			tmp = scanstate->exprstatelists[j];
+			scanstate->exprstatelists[i] = scanstate->exprstatelists[j];
+			scanstate->exprstatelists[j] = tmp;
+		}
 	}
 
 	return scanstate;
