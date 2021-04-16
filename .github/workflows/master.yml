@@ -1,0 +1,20 @@
+on:
+  push:
+    branches:
+      - master
+      - REL_11_STABLE
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v2
+      - name: Configure postgres-strict
+        run: ./configure --enable-debug
+        working-directory: ${{github.workspace}}
+      - name: Build postgres-strict
+        run: make
+        working-directory: ${{github.workspace}}
+      - name: Run the postgres test suite
+        run: make check
+        working-directory: ${{github.workspace}}
