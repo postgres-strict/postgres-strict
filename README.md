@@ -16,3 +16,7 @@ Require AS keyword between expression and column alias.
 ### randomize\_values\_order
 
 Randomize the order in which VALUES produces its values.
+
+### no\_implicit\_time\_zone
+
+Disallow casting directly between date/time/timestamp and timestamptz.

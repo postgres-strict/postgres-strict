@@ -26,6 +26,7 @@
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "parser/scansup.h"
+#include "postgres_strict.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
@@ -605,6 +606,14 @@ date2timestamptz(DateADT dateVal)
 			   *tm = &tt;
 	int			tz;
 
+	if (postgres_strict & POSTGRES_STRICT_NO_IMPLICIT_TIME_ZONE)
+	{
+		ereport(postgres_strict_violation_level,
+				(errcode(postgres_strict_violation_sqlstate),
+				 errmsg("date to timestamptz conversion uses session time zone implicitly"),
+				 errhint("Use the AT TIME ZONE construct, or the timezone() function.")));
+	}
+
 	if (DATE_IS_NOBEGIN(dateVal))
 		TIMESTAMP_NOBEGIN(result);
 	else if (DATE_IS_NOEND(dateVal))
@@ -1152,6 +1161,14 @@ timestamptz_date(PG_FUNCTION_ARGS)
 			   *tm = &tt;
 	fsec_t		fsec;
 	int			tz;
+
+	if (postgres_strict & POSTGRES_STRICT_NO_IMPLICIT_TIME_ZONE)
+	{
+		ereport(postgres_strict_violation_level,
+				(errcode(postgres_strict_violation_sqlstate),
+				 errmsg("timestamptz to date conversion uses session time zone implicitly"),
+				 errhint("Use the AT TIME ZONE construct, or the timezone() function.")));
+	}
 
 	if (TIMESTAMP_IS_NOBEGIN(timestamp))
 		DATE_NOBEGIN(result);
@@ -1781,6 +1798,14 @@ timestamptz_time(PG_FUNCTION_ARGS)
 			   *tm = &tt;
 	int			tz;
 	fsec_t		fsec;
+
+	if (postgres_strict & POSTGRES_STRICT_NO_IMPLICIT_TIME_ZONE)
+	{
+		ereport(postgres_strict_violation_level,
+				(errcode(postgres_strict_violation_sqlstate),
+				 errmsg("timestamptz to time conversion uses session time zone implicitly"),
+				 errhint("Use the AT TIME ZONE construct, or the timezone() function.")));
+	}
 
 	if (TIMESTAMP_NOT_FINITE(timestamp))
 		PG_RETURN_NULL();

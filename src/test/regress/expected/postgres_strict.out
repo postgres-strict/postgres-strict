@@ -110,3 +110,63 @@ SELECT ss.a, ss2.a FROM (VALUES (text 'foo'), ('bar'), ('baz')) ss(a) CROSS JOIN
 (9 rows)
 
 RESET enable_material;
+--
+-- no_implicit_time_zone
+--
+SELECT '2001-02-03'::date::timestamptz;
+ERROR:  date to timestamptz conversion uses session time zone implicitly
+HINT:  Use the AT TIME ZONE construct, or the timezone() function.
+SELECT '2001-02-03 04:05:06'::timestamp::timestamptz;
+ERROR:  timestamp to timestamptz conversion uses session time zone implicitly
+HINT:  Use the AT TIME ZONE construct, or the timezone() function.
+SELECT '2001-02-03 04:05:06+07'::timestamptz::date;
+ERROR:  timestamptz to date conversion uses session time zone implicitly
+HINT:  Use the AT TIME ZONE construct, or the timezone() function.
+SELECT '2001-02-03 04:05:06+07'::timestamptz::time;
+ERROR:  timestamptz to time conversion uses session time zone implicitly
+HINT:  Use the AT TIME ZONE construct, or the timezone() function.
+SELECT '2001-02-03 04:05:06+07'::timestamptz::timestamp;
+ERROR:  timestamptz to timestamp conversion uses session time zone implicitly
+HINT:  Use the AT TIME ZONE construct, or the timezone() function.
+SELECT date_part('hour', '2001-02-03 04:05:06+07'::timestamptz);
+ERROR:  date_part(text, timestamptz) uses session time zone implicitly
+HINT:  Use the AT TIME ZONE construct, or the timezone() function to convert to timestamp before calling date_part().
+SELECT extract(HOUR FROM '2001-02-03 04:05:06+07'::timestamptz);
+ERROR:  date_part(text, timestamptz) uses session time zone implicitly
+HINT:  Use the AT TIME ZONE construct, or the timezone() function to convert to timestamp before calling date_part().
+SELECT date_trunc('hour', '2001-02-03 04:05:06+07'::timestamptz);
+ERROR:  date_trunc(text, timestamptz) uses session time zone implicitly
+HINT:  Use the AT TIME ZONE construct, or the timezone() function to convert to timestamp before calling date_trunc().
+SELECT make_timestamptz(2001, 02, 03, 04, 05, 06);
+ERROR:  timestamp to timestamptz conversion uses session time zone implicitly
+HINT:  Use the AT TIME ZONE construct, or the timezone() function.
+SELECT now() = CURRENT_DATE;
+ERROR:  date to timestamptz conversion uses session time zone implicitly
+HINT:  Use the AT TIME ZONE construct, or the timezone() function.
+SELECT now() = LOCALTIMESTAMP;
+ERROR:  timestamp to timestamptz conversion uses session time zone implicitly
+HINT:  Use the AT TIME ZONE construct, or the timezone() function.
+SELECT date_trunc('day', '2001-02-03 04:05:06+07'::timestamptz AT TIME ZONE 'Asia/Bangkok');
+        date_trunc        
+--------------------------
+ Sat Feb 03 00:00:00 2001
+(1 row)
+
+SELECT make_timestamptz(2001, 02, 03, 04, 05, 06, 'Asia/Bangkok');
+       make_timestamptz       
+------------------------------
+ Fri Feb 02 13:05:06 2001 PST
+(1 row)
+
+SELECT '2001-02-03 04:05:06+07'::timestamptz = '2001-02-03 04:05:06'::timestamp AT TIME ZONE 'Asia/Bangkok';
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT ('2001-02-03 04:05:06+07'::timestamptz AT TIME ZONE 'Asia/Bangkok')::date = '2001-02-03'::date;
+ ?column? 
+----------
+ t
+(1 row)
+

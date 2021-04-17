@@ -31,6 +31,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/scansup.h"
+#include "postgres_strict.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
@@ -3946,6 +3947,14 @@ timestamptz_trunc(PG_FUNCTION_ARGS)
 	struct pg_tm tt,
 			   *tm = &tt;
 
+	if (postgres_strict & POSTGRES_STRICT_NO_IMPLICIT_TIME_ZONE)
+	{
+		ereport(postgres_strict_violation_level,
+				(errcode(postgres_strict_violation_sqlstate),
+				 errmsg("date_trunc(text, timestamptz) uses session time zone implicitly"),
+				 errhint("Use the AT TIME ZONE construct, or the timezone() function to convert to timestamp before calling date_trunc().")));
+	}
+
 	if (TIMESTAMP_NOT_FINITE(timestamp))
 		PG_RETURN_TIMESTAMPTZ(timestamp);
 
@@ -4643,6 +4652,14 @@ timestamptz_part(PG_FUNCTION_ARGS)
 	struct pg_tm tt,
 			   *tm = &tt;
 
+	if (postgres_strict & POSTGRES_STRICT_NO_IMPLICIT_TIME_ZONE)
+	{
+		ereport(postgres_strict_violation_level,
+				(errcode(postgres_strict_violation_sqlstate),
+				 errmsg("date_part(text, timestamptz) uses session time zone implicitly"),
+				 errhint("Use the AT TIME ZONE construct, or the timezone() function to convert to timestamp before calling date_part().")));
+	}
+
 	lowunits = downcase_truncate_identifier(VARDATA_ANY(units),
 											VARSIZE_ANY_EXHDR(units),
 											false);
@@ -5109,6 +5126,14 @@ timestamp2timestamptz(Timestamp timestamp)
 	fsec_t		fsec;
 	int			tz;
 
+	if (postgres_strict & POSTGRES_STRICT_NO_IMPLICIT_TIME_ZONE)
+	{
+		ereport(postgres_strict_violation_level,
+				(errcode(postgres_strict_violation_sqlstate),
+				 errmsg("timestamp to timestamptz conversion uses session time zone implicitly"),
+				 errhint("Use the AT TIME ZONE construct, or the timezone() function.")));
+	}
+
 	if (TIMESTAMP_NOT_FINITE(timestamp))
 		result = timestamp;
 	else
@@ -5136,6 +5161,14 @@ Datum
 timestamptz_timestamp(PG_FUNCTION_ARGS)
 {
 	TimestampTz timestamp = PG_GETARG_TIMESTAMPTZ(0);
+
+	if (postgres_strict & POSTGRES_STRICT_NO_IMPLICIT_TIME_ZONE)
+	{
+		ereport(postgres_strict_violation_level,
+				(errcode(postgres_strict_violation_sqlstate),
+				 errmsg("timestamptz to timestamp conversion uses session time zone implicitly"),
+				 errhint("Use the AT TIME ZONE construct, or the timezone() function.")));
+	}
 
 	PG_RETURN_TIMESTAMP(timestamptz2timestamp(timestamp));
 }
