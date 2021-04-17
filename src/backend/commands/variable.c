@@ -517,6 +517,8 @@ check_postgres_strict_disable(char **newval, void **extra, GucSource source)
 				disabled |= POSTGRES_STRICT_REQUIRE_COLUMN_AS;
 			else if (pg_strcasecmp(tok, "randomize_values_order") == 0)
 				disabled |= POSTGRES_STRICT_RANDOMIZE_VALUES_ORDER;
+			else if (pg_strcasecmp(tok, "no_implicit_time_zone") == 0)
+				disabled |= POSTGRES_STRICT_NO_IMPLICIT_TIME_ZONE;
 			else
 			{
 				GUC_check_errdetail("Unrecognized key word: \"%s\".", tok);
