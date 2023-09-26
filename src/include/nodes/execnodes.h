@@ -2174,6 +2174,18 @@ typedef struct PresortedKeyData
 } PresortedKeyData;
 
 /* ----------------
+ *	 RandomizeState information
+ * ----------------
+ */
+typedef struct RandomizeState
+{
+	ScanState	ss;				/* its first field is NodeTag */
+	bool		randomAccess;	/* need random access to sort output? */
+	bool		sort_Done;		/* sort completed yet? */
+	void	   *tuplesortstate; /* private state of tuplesort.c */
+} RandomizeState;
+
+/* ----------------
  *	 Shared memory container for per-worker sort information
  * ----------------
  */

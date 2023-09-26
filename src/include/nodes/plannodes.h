@@ -821,6 +821,15 @@ typedef struct Memoize
 } Memoize;
 
 /* ----------------
+ *		randomize node
+ * ----------------
+ */
+typedef struct Randomize
+{
+	Plan		plan;
+} Randomize;
+
+/* ----------------
  *		sort node
  * ----------------
  */

@@ -101,6 +101,7 @@
 #include "executor/nodeNamedtuplestorescan.h"
 #include "executor/nodeNestloop.h"
 #include "executor/nodeProjectSet.h"
+#include "executor/nodeRandomize.h"
 #include "executor/nodeRecursiveunion.h"
 #include "executor/nodeResult.h"
 #include "executor/nodeSamplescan.h"
@@ -315,6 +316,11 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 		case T_Material:
 			result = (PlanState *) ExecInitMaterial((Material *) node,
 													estate, eflags);
+			break;
+
+		case T_Randomize:
+			result = (PlanState *) ExecInitRandomize((Randomize *) node,
+													 estate, eflags);
 			break;
 
 		case T_Sort:
@@ -711,6 +717,10 @@ ExecEndNode(PlanState *node)
 			 */
 		case T_MaterialState:
 			ExecEndMaterial((MaterialState *) node);
+			break;
+
+		case T_RandomizeState:
+			ExecEndRandomize((RandomizeState *) node);
 			break;
 
 		case T_SortState:

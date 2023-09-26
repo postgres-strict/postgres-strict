@@ -60,6 +60,7 @@ OBJS = \
 	nodeNamedtuplestorescan.o \
 	nodeNestloop.o \
 	nodeProjectSet.o \
+	nodeRandomize.o \
 	nodeRecursiveunion.o \
 	nodeResult.o \
 	nodeSamplescan.o \
