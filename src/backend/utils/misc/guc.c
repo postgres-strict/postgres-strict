@@ -660,7 +660,7 @@ static char *recovery_target_string;
 static char *recovery_target_xid_string;
 static char *recovery_target_name_string;
 static char *recovery_target_lsn_string;
-
+static char *postgres_strict_disable_string;
 
 /* should be static, but commands/variable.c needs to get at this */
 char	   *role_string;
@@ -4599,6 +4599,18 @@ static struct config_string ConfigureNamesString[] =
 		&backtrace_functions,
 		"",
 		check_backtrace_functions, assign_backtrace_functions, NULL
+	},
+
+	{
+		{"postgres_strict.disable", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Disables specified postgres-strict features"),
+			gettext_noop("The special values 'all' and 'none' can be used to disable "
+						 "or enable all strict checks, respectively."),
+			GUC_LIST_INPUT
+		},
+		&postgres_strict_disable_string,
+		"none",
+		check_postgres_strict_disable, assign_postgres_strict_disable, NULL
 	},
 
 	/* End-of-list marker */

@@ -26,6 +26,7 @@
 #include "commands/variable.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "postgres_strict.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
@@ -463,6 +464,79 @@ show_log_timezone(void)
 		return tzn;
 
 	return "unknown";
+}
+
+/*
+ * postgres_strict.disable
+ */
+int postgres_strict = POSTGRES_STRICT_ALL;
+
+bool
+check_postgres_strict_disable(char **newval, void **extra, GucSource source)
+{
+	int *myextra;
+	int disabled = 0;
+
+	(void) source;
+
+	if (pg_strcasecmp(*newval, "all") == 0)
+		disabled = POSTGRES_STRICT_ALL;
+	else if (pg_strcasecmp(*newval, "none") == 0)
+		disabled = POSTGRES_STRICT_NONE;
+	else
+	{
+		char *rawstring;
+		List *elemlist;
+		ListCell *l;
+
+		/* Need a modifiable copy of string */
+		rawstring = pstrdup(*newval);
+
+		/* Parse string into list of identifiers */
+		if (!SplitIdentifierString(rawstring, ',', &elemlist))
+		{
+			/* syntax error in list */
+			GUC_check_errdetail("List syntax is invalid.");
+			pfree(rawstring);
+			list_free(elemlist);
+			return false;
+		}
+
+		foreach(l, elemlist)
+		{
+			char	   *tok = (char *) lfirst(l);
+
+			if (pg_strcasecmp(tok, "all") == 0 || pg_strcasecmp(tok, "none") == 0)
+			{
+				GUC_check_errdetail("Key word \"%s\" cannot be combined with other key words.", tok);
+				pfree(rawstring);
+				list_free(elemlist);
+				return false;
+			}
+			else
+			{
+				GUC_check_errdetail("Unrecognized key word: \"%s\".", tok);
+				pfree(rawstring);
+				list_free(elemlist);
+				return false;
+			}
+		}
+
+		pfree(rawstring);
+		list_free(elemlist);
+	}
+
+	myextra = (int *) malloc(sizeof(int));
+	*myextra = POSTGRES_STRICT_ALL & (~disabled);
+	*extra = (void *) myextra;
+
+	return true;
+}
+
+void
+assign_postgres_strict_disable(const char *newval, void *extra)
+{
+	postgres_strict = *((int *) extra);
 }
 
 

@@ -21,6 +21,8 @@ extern const char *show_timezone(void);
 extern bool check_log_timezone(char **newval, void **extra, GucSource source);
 extern void assign_log_timezone(const char *newval, void *extra);
 extern const char *show_log_timezone(void);
+extern bool check_postgres_strict_disable(char **newval, void **extra, GucSource source);
+extern void assign_postgres_strict_disable(const char *newval, void *extra);
 extern bool check_transaction_read_only(bool *newval, void **extra, GucSource source);
 extern bool check_XactIsoLevel(int *newval, void **extra, GucSource source);
 extern bool check_transaction_deferrable(bool *newval, void **extra, GucSource source);
