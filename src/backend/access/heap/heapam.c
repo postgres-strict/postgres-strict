@@ -305,6 +305,11 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 		else
 			scan->rs_base.rs_flags &= ~SO_ALLOW_SYNC;
 	}
+	else if (scan->rs_nblocks > 0)
+	{
+		scan->rs_base.rs_flags &= ~SO_ALLOW_SYNC;
+		scan->rs_startblock = (random() % scan->rs_nblocks);
+	}
 	else if (allow_sync && synchronize_seqscans)
 	{
 		scan->rs_base.rs_flags |= SO_ALLOW_SYNC;
