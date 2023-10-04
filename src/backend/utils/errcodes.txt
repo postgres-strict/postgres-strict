@@ -487,6 +487,7 @@ P0001    E    ERRCODE_RAISE_EXCEPTION                                        rai
 P0002    E    ERRCODE_NO_DATA_FOUND                                          no_data_found
 P0003    E    ERRCODE_TOO_MANY_ROWS                                          too_many_rows
 P0004    E    ERRCODE_ASSERT_FAILURE                                         assert_failure
+PS001    E    ERRCODE_POSTGRES_STRICT_VIOLATION                              postgres_strict_violation
 
 Section: Class XX - Internal Error
 
