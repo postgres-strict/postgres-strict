@@ -469,7 +469,7 @@ show_log_timezone(void)
 /*
  * postgres_strict.disable
  */
-int postgres_strict = POSTGRES_STRICT_ALL;
+int postgres_strict = POSTGRES_STRICT_NONE;
 
 bool
 check_postgres_strict_disable(char **newval, void **extra, GucSource source)
