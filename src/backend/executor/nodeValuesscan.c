@@ -22,6 +22,7 @@
  *		ExecReScanValuesScan	rescans the values list
  */
 #include "postgres.h"
+#include "postgres_strict.h"
 
 #include "executor/executor.h"
 #include "executor/nodeValuesscan.h"
@@ -215,6 +216,7 @@ ExecInitValuesScan(ValuesScan *node, EState *estate, int eflags)
 	ListCell   *vtl;
 	int			i;
 	PlanState  *planstate;
+	List **values_lists;
 
 	/*
 	 * ValuesScan should not have any children.
@@ -282,10 +284,31 @@ ExecInitValuesScan(ValuesScan *node, EState *estate, int eflags)
 		palloc(scanstate->array_len * sizeof(List *));
 	scanstate->exprstatelists = (List **)
 		palloc0(scanstate->array_len * sizeof(List *));
+
+	values_lists = (List **) palloc(scanstate->array_len * sizeof(List *));
 	i = 0;
 	foreach(vtl, node->values_lists)
 	{
-		List	   *exprs = castNode(List, lfirst(vtl));
+		values_lists[i++] = castNode(List, lfirst(vtl));
+	}
+
+	if (postgres_strict & POSTGRES_STRICT_RANDOMIZE_VALUES_ORDER)
+	{
+		for (i = scanstate->array_len - 1; i > 0; i--)
+		{
+			int j;
+			List *tmp;
+
+			j = (random() % (i + 1));
+			tmp = values_lists[i];
+			values_lists[i] = values_lists[j];
+			values_lists[j] = tmp;
+		}
+	}
+
+	for (i = 0; i < scanstate->array_len; i++)
+	{
+		List *exprs = values_lists[i];
 
 		scanstate->exprlists[i] = exprs;
 
@@ -313,7 +336,6 @@ ExecInitValuesScan(ValuesScan *node, EState *estate, int eflags)
 
 			estate->es_jit_flags = saved_jit_flags;
 		}
-		i++;
 	}
 
 	return scanstate;
